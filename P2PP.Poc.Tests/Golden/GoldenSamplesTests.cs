@@ -119,7 +119,7 @@ public sealed class PaletteCommandGenerationTests
     {
         for (var i = 0; i < outputLines.Count; i++)
         {
-            if (!outputLines[i].Contains("P2PP - INSERT PING CODE", StringComparison.OrdinalIgnoreCase))
+            if (!outputLines[i].Contains("INSERT PING CODE", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             // Find first non-comment command after the marker.

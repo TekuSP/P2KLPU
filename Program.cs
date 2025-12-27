@@ -11,7 +11,7 @@ using System.Text;
 //  2) Keep configuration in-G-code via ';P2KLPU ...' directives.
 //  3) Print useful console output (splice plan).
 //  4) Normalize pauses/pings to be more Klipper-friendly (e.g., rewrite G4 S -> G4 P, insert M400).
-// Not a full P2PP port yet: purge tower manipulation, sidewipe, omega header generation, etc.
+// Missing: purge tower manipulation, sidewipe, omega header generation, etc.
 
 CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
 CultureInfo.DefaultThreadCurrentUICulture = CultureInfo.InvariantCulture;
@@ -238,7 +238,7 @@ static void PrintHelp()
     Console.WriteLine("  - Klipper mode targets Klipper + Palette 2/2S connected mode.");
     Console.WriteLine("  - Configuration is passed via ;P2KLPU comment directives embedded by the slicer (not via CLI flags).");
     Console.WriteLine("  - PrusaSlicer env vars used when present: SLIC3R_PP_OUTPUT_NAME, SLIC3R_PP_HOST");
-    Console.WriteLine("  - This POC is not a full P2PP port yet; it currently focuses on analysis + Klipper-safe normalization (e.g., G4 handling)." );
+    Console.WriteLine("  - It currently focuses on analysis + Klipper-safe normalization (e.g., G4 handling)." );
 }
 
 static void WriteTextFile(string path, IEnumerable<string> lines)

@@ -58,7 +58,7 @@ static class RawMmuTwoPassProcessor
             output.Add(h);
 
         output.Add(";");
-        output.Add(";--------- THIS CODE HAS BEEN PROCESSED BY P2PP.NET POC ---");
+        output.Add(";--------- THIS CODE HAS BEEN PROCESSED BY THE .NET POC ---");
         output.Add($"; Source: {Path.GetFileName(sourcePath)}");
         output.Add($"; DisplayName: {Path.GetFileName(displayName)}");
         output.Add($"; TimestampUtc: {timestampUtc:O}");
@@ -220,11 +220,11 @@ static class RawMmuTwoPassProcessor
             {
                 var pingNumber = pingIdx + 1;
                 var mm = nextPing + options.AutoloadingOffsetMm;
-                output.Add($"; --- P2PP - INSERT PING CODE {pingNumber} after {nextPing.ToString("0.0000", CultureInfo.InvariantCulture)}mm of extrusion");
+                output.Add($"; --- P2KLPU - INSERT PING CODE {pingNumber} after {nextPing.ToString("0.0000", CultureInfo.InvariantCulture)}mm of extrusion");
                 output.Add("M400");
                 output.Add("G4 S0");
                 output.Add("O31 " + OmegaEncoding.HexifyFloat(mm));
-                output.Add("; --- P2PP - END PING CODE");
+                output.Add("; --- P2KLPU - END PING CODE");
 
                 pingIdx++;
                 nextPing = pingIdx < scan.Pings.Count ? scan.Pings[pingIdx].EffectiveLocationMm : double.PositiveInfinity;

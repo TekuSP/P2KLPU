@@ -50,7 +50,7 @@ public sealed class EndToEndRawMmuToPaletteTests
         // Ping block inserted and normalized: G4 S0 becomes M400 (so we should see 2 M400 lines inside the ping block)
         var pingStart = processed
             .Select((l, i) => (Line: l, Index: i))
-            .FirstOrDefault(t => t.Line.Contains("P2PP - INSERT PING CODE", StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(t => t.Line.Contains("INSERT PING CODE", StringComparison.OrdinalIgnoreCase));
         Assert.True(pingStart.Line != null, "Expected a ping block to be inserted");
 
         Assert.Contains(processed, l => l.TrimStart().StartsWith("O31", StringComparison.OrdinalIgnoreCase));

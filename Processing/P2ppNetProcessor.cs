@@ -28,15 +28,21 @@ static class P2ppNetProcessor
         string sourcePath,
         DateTime timestampUtc)
     {
+        var outputTarget = string.IsNullOrWhiteSpace(options.OutputPath) ? "(not written)" : options.OutputPath;
+        var firstLine = $"; P2KLPU post-processed: {Path.GetFileName(sourcePath)} -> {outputTarget}";
+
         if (options.RawMmuMode)
         {
             var generated = RawMmuTwoPassProcessor.Process(lines, options, displayName, sourcePath, timestampUtc);
-            return NormalizeLines(generated, options);
+            var normalized = NormalizeLines(generated, options);
+            var withProvenance = new List<string>(capacity: normalized.Count + 1);
+            withProvenance.Add(firstLine);
+            withProvenance.AddRange(normalized);
+            return withProvenance;
         }
 
         var processedLines = new List<string>(capacity: lines.Length + 64);
-        processedLines.Add($";--------- THIS CODE HAS BEEN PROCESSED BY P2PP.NET POC ---");
-        processedLines.Add($"; Source: {Path.GetFileName(sourcePath)}");
+        processedLines.Add(firstLine);
         processedLines.Add($"; DisplayName: {Path.GetFileName(displayName)}");
         processedLines.Add($"; TimestampUtc: {timestampUtc:O}");
         processedLines.Add(";");
@@ -88,7 +94,7 @@ static class P2ppNetProcessor
                 continue;
             }
 
-            if (raw.Contains("P2PP - INSERT PING CODE", StringComparison.OrdinalIgnoreCase))
+            if (raw.Contains("INSERT PING CODE", StringComparison.OrdinalIgnoreCase))
             {
                 inPingBlock = true;
                 pingBeforeMacroEmittedForBlock = false;
@@ -96,7 +102,7 @@ static class P2ppNetProcessor
                 continue;
             }
 
-            if (raw.Contains("P2PP - END PING CODE", StringComparison.OrdinalIgnoreCase))
+            if (raw.Contains("END PING CODE", StringComparison.OrdinalIgnoreCase))
             {
                 inPingBlock = false;
                 pingBeforeMacroEmittedForBlock = false;

@@ -74,7 +74,7 @@ public sealed class OctoPrintMarlinConnectedTests
         Assert.Contains(processed, l => l.TrimStart().StartsWith(";P2KLPU_OCTO O31 D447622b7", StringComparison.OrdinalIgnoreCase));
 
         // Ensure ping macros still wrap the (now-commented) O31 line.
-        var pingMarkerIndex = IndexOfFirst(processed, l => l.Contains("P2PP - INSERT PING CODE", StringComparison.OrdinalIgnoreCase));
+        var pingMarkerIndex = IndexOfFirst(processed, l => l.Contains("INSERT PING CODE", StringComparison.OrdinalIgnoreCase));
         Assert.True(pingMarkerIndex >= 0, "Expected ping marker in output");
 
         var beginIndex = IndexOfFirst(processed, l => StripComment(l).Trim().Equals("PING_BEGIN", StringComparison.OrdinalIgnoreCase));
