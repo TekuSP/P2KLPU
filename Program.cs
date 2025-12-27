@@ -68,6 +68,34 @@ if (filamentTypes.Count > 0)
         Console.WriteLine($"Detected filament types: {string.Join(", ", filamentTypes.Select((t, i) => $"DI{i + 1}={t}"))}");
 }
 
+// Optional: material aliasing attached to the filament profile (Spoolman-style).
+// This lets users define a stable token for MATERIAL_* matching without relying on tool indices.
+var materialAliases = SlicerConfigDetector.TryReadP2klpuMaterialAliases(lines);
+if (materialAliases.Count > 0)
+{
+    var types = new List<string>(options.FilamentTypes);
+    while (types.Count < materialAliases.Count)
+        types.Add("");
+
+    var changed = false;
+    for (var i = 0; i < materialAliases.Count; i++)
+    {
+        var alias = materialAliases[i];
+        if (string.IsNullOrWhiteSpace(alias))
+            continue;
+
+        types[i] = alias.Trim();
+        changed = true;
+    }
+
+    if (changed)
+    {
+        options = options with { FilamentTypes = types };
+        if (options.Verbose)
+            Console.WriteLine($"Detected p2klpu_material aliases: {string.Join(", ", types.Select((t, i) => $"DI{i + 1}={t}"))}");
+    }
+}
+
 // Directives are passed via slicer-generated comment lines anywhere in the G-code, e.g.:
 //   ;P2KLPU SPLICE_OFFSET=0
 //   ;P2KLPU DEFAULT_ALGO=10,5,3
@@ -118,6 +146,12 @@ if (directives.Count > 0)
                 || k.StartsWith("MATERIAL_", StringComparison.OrdinalIgnoreCase))
             {
                 recognized.Add(d);
+                continue;
+            }
+            else if (k.StartsWith("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase))
+            {
+                recognized.Add(d);
+                continue;
             }
             else
             {

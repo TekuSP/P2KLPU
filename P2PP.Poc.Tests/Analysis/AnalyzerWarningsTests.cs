@@ -5,6 +5,34 @@ using Xunit;
 public sealed class AnalyzerWarningsTests
 {
     [Fact]
+    public void Analyze_NonRawMmu_Warns_WhenMaterialTransitionFallsBackToDefaultAlgorithm()
+    {
+        var lines = new[]
+        {
+            "M83",
+            "T0",
+            "G1 X0 Y0 E1.0",
+            "T1",
+            "G1 X10 Y10 E2.0",
+        };
+
+        var options = DefaultOptions() with
+        {
+            RawMmuMode = false,
+            FilamentTypes = new[] { "PETG-MATTE", "PLA" },
+            DefaultAlgorithm = new SpliceAlgorithm(3, -1, -6),
+        };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+
+        Assert.Contains(
+            analysis.Warnings,
+            w => w.Contains("No algorithm override matched", StringComparison.OrdinalIgnoreCase)
+                 && w.Contains("PETG-MATTE", StringComparison.OrdinalIgnoreCase)
+                 && w.Contains("PLA", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Analyze_RawMmu_Warns_WhenTowerDetectionFallsBack()
     {
         var lines = new[]

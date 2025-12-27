@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 /// <summary>
@@ -33,7 +34,9 @@ static partial class SlicerConfigDetector
         //  - filament_notes (older / always present): a semicolon-separated list of notes, one per filament
         // Users can put e.g. "spoolman_id=123" or "target_spool=123" in those fields.
 
-        var entries = TryReadPrusaPerFilamentStringList(lines, "filament_custom_variables");
+        var entries = TryReadPrusaPerFilamentStringList(lines, "custom_parameters_filament");
+        if (entries.Count == 0)
+            entries = TryReadPrusaPerFilamentStringList(lines, "filament_custom_variables");
         if (entries.Count == 0)
             entries = TryReadPrusaPerFilamentStringList(lines, "filament_notes");
         if (entries.Count == 0)
@@ -56,6 +59,75 @@ static partial class SlicerConfigDetector
                     result[i] = n;
                     break;
                 }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Attempts to extract per-filament material aliases used for MATERIAL_* algorithm matching.
+    /// </summary>
+    /// <remarks>
+    /// This mirrors the Spoolman pattern: stash metadata per filament in the slicer profile so it
+    /// follows whichever tool/extruder the filament is assigned to.
+    ///
+    /// Supported sources (first found wins):
+    /// <list type="bullet">
+    /// <item><description><c>custom_parameters_filament</c> (PrusaSlicer newer exports)</description></item>
+    /// <item><description><c>filament_custom_variables</c></description></item>
+    /// <item><description><c>filament_notes</c></description></item>
+    /// </list>
+    ///
+    /// Supported encodings per filament entry:
+    /// <list type="bullet">
+    /// <item><description>JSON object: <c>{"p2klpu_material":"PETG-MATTE"}</c></description></item>
+    /// <item><description>Key/value text: <c>p2klpu_material=PETG-MATTE</c></description></item>
+    /// </list>
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>List of aliases (null when not specified), one entry per filament slot; empty when unavailable.</returns>
+    public static IReadOnlyList<string?> TryReadP2klpuMaterialAliases(string[] lines)
+    {
+        var entries = TryReadPrusaPerFilamentStringList(lines, "custom_parameters_filament");
+        if (entries.Count == 0)
+            entries = TryReadPrusaPerFilamentStringList(lines, "filament_custom_variables");
+        if (entries.Count == 0)
+            entries = TryReadPrusaPerFilamentStringList(lines, "filament_notes");
+        if (entries.Count == 0)
+            return Array.Empty<string?>();
+
+        var result = new string?[entries.Count];
+        const string key = "p2klpu_material";
+
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var e = entries[i];
+            if (string.IsNullOrWhiteSpace(e))
+                continue;
+
+            // JSON object form (common in custom_parameters_filament).
+            var trimmed = e.Trim();
+            if (trimmed.StartsWith("{", StringComparison.Ordinal) && trimmed.EndsWith("}", StringComparison.Ordinal))
+            {
+                // Prusa sometimes escapes JSON quotes in the footer, producing strings like:
+                //   {\"p2klpu_material\":\"PETG-MATTE\"}
+                // Normalize that back into valid JSON.
+                var json = trimmed;
+                if (json.Contains("\\\"", StringComparison.Ordinal))
+                    json = json.Replace("\\\"", "\"", StringComparison.Ordinal);
+
+                if (TryExtractStringFromJson(json, key, out var v) && !string.IsNullOrWhiteSpace(v))
+                {
+                    result[i] = v.Trim();
+                    continue;
+                }
+            }
+
+            // Fallback: key=value text form in notes/custom variables.
+            if (TryExtractStringFromText(e, key, out var t) && !string.IsNullOrWhiteSpace(t))
+            {
+                result[i] = t.Trim();
             }
         }
 
@@ -117,14 +189,22 @@ static partial class SlicerConfigDetector
         if (rhs.Length == 0)
             return Array.Empty<string>();
 
-        // If the value contains quotes or commas, treat as CSV-ish list.
-        // Otherwise treat as semicolon-separated list.
-        if (rhs.Contains('"', StringComparison.Ordinal) || rhs.Contains(',', StringComparison.Ordinal))
-        {
+        // PrusaSlicer uses different separators for different per-filament keys.
+        // Most are semicolon-separated (even when quoted), while some newer fields may be CSV-ish.
+        // Heuristic: treat as CSV-ish only when we see commas and no semicolons.
+        var hasSemicolon = rhs.Contains(';', StringComparison.Ordinal);
+        var hasComma = rhs.Contains(',', StringComparison.Ordinal);
+        if (hasComma && !hasSemicolon)
             return SplitCsvish(rhs);
-        }
 
         var parts = rhs.Split(';', StringSplitOptions.TrimEntries);
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var t = parts[i].Trim();
+            if (t.Length >= 2 && t[0] == '"' && t[^1] == '"')
+                t = t[1..^1];
+            parts[i] = t;
+        }
         return parts;
     }
 
@@ -204,5 +284,67 @@ static partial class SlicerConfigDetector
         if (!m.Success)
             return false;
         return int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+    }
+
+    private static bool TryExtractStringFromText(string text, string key, out string value)
+    {
+        // Accept patterns like:
+        //  p2klpu_material=PETG-MATTE
+        //  p2klpu_material: PETG-MATTE
+        //  p2klpu_material = "PETG-MATTE"
+        value = "";
+        var pattern = $@"(?i)\b{Regex.Escape(key)}\b\s*[:=]\s*(.+)";
+        var m = Regex.Match(text, pattern);
+        if (!m.Success)
+            return false;
+
+        var raw = m.Groups[1].Value.Trim();
+        if (raw.Length == 0)
+            return false;
+
+        // If there are multiple tokens on the same line, keep the first segment.
+        // This is intentionally simple and forgiving.
+        var cut = raw.IndexOfAny([';', ',']);
+        if (cut >= 0)
+            raw = raw[..cut].Trim();
+
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+            raw = raw[1..^1];
+
+        value = raw;
+        return true;
+    }
+
+    private static bool TryExtractStringFromJson(string json, string key, out string value)
+    {
+        value = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (!prop.Name.Equals(key, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (prop.Value.ValueKind == JsonValueKind.String)
+                {
+                    value = prop.Value.GetString() ?? "";
+                    return true;
+                }
+
+                // Allow non-string values but stringify them.
+                value = prop.Value.ToString() ?? "";
+                return true;
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

@@ -37,18 +37,33 @@ static class GcodeAnalyzer
         {
             var scan = RawMmuScanner.Scan(lines, options);
             var splices = new List<SpliceEvent>(scan.Splices.Count);
+            var defaultAlgoFallbackCounts = new Dictionary<(string From, string To), int>(new MaterialPairComparer());
             foreach (var s in scan.Splices)
             {
                 var fromInput = s.FromTool + 1;
                 var toInput = s.ToTool + 1;
-                var algo = ResolveAlgorithm(options, fromInput, toInput);
+                var fromMaterial = GetMaterial(options, fromInput);
+                var toMaterial = GetMaterial(options, toInput);
+                var selection = AlgorithmResolver.Resolve(options, fromInput, toInput, fromMaterial, toMaterial);
+                if (selection.Reason.Equals("default algorithm", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(fromMaterial)
+                    && !string.IsNullOrWhiteSpace(toMaterial))
+                {
+                    var k = (fromMaterial, toMaterial);
+                    defaultAlgoFallbackCounts[k] = defaultAlgoFallbackCounts.GetValueOrDefault(k) + 1;
+                }
                 splices.Add(new SpliceEvent(
                     Index: s.Index,
                     FromInput: fromInput,
                     ToInput: toInput,
                     LocationMm: s.EffectiveLocationMm,
                     LengthMm: s.EffectiveLengthMm,
-                    Algorithm: algo));
+                    Algorithm: selection.Algorithm));
+            }
+
+            foreach (var kv in defaultAlgoFallbackCounts.OrderByDescending(k => k.Value))
+            {
+                warnings.Add($"No algorithm override matched for material transition '{kv.Key.From}' -> '{kv.Key.To}' ({kv.Value} splice(s)); using default algorithm {options.DefaultAlgorithm}.");
             }
 
             foreach (var s in splices)
@@ -157,7 +172,9 @@ static class GcodeAnalyzer
 
                     var fromInput = currentTool + 1;
                     var toInput = newTool + 1;
-                    var algo = ResolveAlgorithm(options, fromInput, toInput);
+                    var fromMaterial = GetMaterial(options, fromInput);
+                    var toMaterial = GetMaterial(options, toInput);
+                    var selection = AlgorithmResolver.Resolve(options, fromInput, toInput, fromMaterial, toMaterial);
 
                     splicesNonRaw.Add(new SpliceEvent(
                         Index: ++spliceIndex,
@@ -165,7 +182,14 @@ static class GcodeAnalyzer
                         ToInput: toInput,
                         LocationMm: location,
                         LengthMm: length,
-                        Algorithm: algo));
+                        Algorithm: selection.Algorithm));
+
+                    if (selection.Reason.Equals("default algorithm", StringComparison.OrdinalIgnoreCase)
+                        && !string.IsNullOrWhiteSpace(fromMaterial)
+                        && !string.IsNullOrWhiteSpace(toMaterial))
+                    {
+                        warnings.Add($"No algorithm override matched for material transition '{fromMaterial}' -> '{toMaterial}' (DI{fromInput} -> DI{toInput}); using default algorithm {options.DefaultAlgorithm}.");
+                    }
                 }
 
                 currentTool = newTool;
@@ -187,7 +211,9 @@ static class GcodeAnalyzer
                         previousSpliceLocation = location;
                         var fromInput = currentTool + 1;
                         var toInput = newTool2 + 1;
-                        var algo = ResolveAlgorithm(options, fromInput, toInput);
+                        var fromMaterial = GetMaterial(options, fromInput);
+                        var toMaterial = GetMaterial(options, toInput);
+                        var selection = AlgorithmResolver.Resolve(options, fromInput, toInput, fromMaterial, toMaterial);
 
                         splicesNonRaw.Add(new SpliceEvent(
                             Index: ++spliceIndex,
@@ -195,7 +221,14 @@ static class GcodeAnalyzer
                             ToInput: toInput,
                             LocationMm: location,
                             LengthMm: length,
-                            Algorithm: algo));
+                            Algorithm: selection.Algorithm));
+
+                        if (selection.Reason.Equals("default algorithm", StringComparison.OrdinalIgnoreCase)
+                            && !string.IsNullOrWhiteSpace(fromMaterial)
+                            && !string.IsNullOrWhiteSpace(toMaterial))
+                        {
+                            warnings.Add($"No algorithm override matched for material transition '{fromMaterial}' -> '{toMaterial}' (DI{fromInput} -> DI{toInput}); using default algorithm {options.DefaultAlgorithm}.");
+                        }
                     }
                     currentTool = newTool2;
                 }
@@ -318,12 +351,26 @@ static class GcodeAnalyzer
         return false;
     }
 
-    private static SpliceAlgorithm ResolveAlgorithm(Options options, int fromInput, int toInput)
+    private static string GetMaterial(Options options, int input)
     {
-        var key = new TransitionKey(fromInput, toInput);
-        return options.AlgorithmOverrides.TryGetValue(key, out var algo)
-            ? algo
-            : options.DefaultAlgorithm;
+        var idx = input - 1;
+        if (idx < 0 || idx >= options.FilamentTypes.Count)
+            return "";
+        return options.FilamentTypes[idx] ?? "";
+    }
+
+    private sealed class MaterialPairComparer : IEqualityComparer<(string From, string To)>
+    {
+        public bool Equals((string From, string To) x, (string From, string To) y)
+            => StringComparer.OrdinalIgnoreCase.Equals(x.From, y.From)
+                && StringComparer.OrdinalIgnoreCase.Equals(x.To, y.To);
+
+        public int GetHashCode((string From, string To) obj)
+        {
+            var h1 = StringComparer.OrdinalIgnoreCase.GetHashCode(obj.From ?? "");
+            var h2 = StringComparer.OrdinalIgnoreCase.GetHashCode(obj.To ?? "");
+            return HashCode.Combine(h1, h2);
+        }
     }
 
     private static string StripComment(string line)

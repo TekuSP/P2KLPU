@@ -114,11 +114,24 @@ General:
 - `;P2KLPU RAW_MMU=0|1`
 - `;P2KLPU PRINTERPROFILE=<hex>` (Palette2 printer profile ID)
 - `;P2KLPU AUTOLOADINGOFFSET=<mm>` (see note below)
+- `;P2KLPU FILAMENTOVERRIDE_DI<n>=<name>` (overrides PrusaSlicer `filament_type[n-1]` for MATERIAL matching)
+- `;P2KLPU FILAMENTOVERRIDE=<name>` (alias for `FILAMENTOVERRIDE_DI1`)
 - `;P2KLPU EXTRAENDFILAMENT=<mm>`
 - `;P2KLPU MINSTARTSPLICE=<mm>`
 - `;P2KLPU MINSPLICE=<mm>`
 - `;P2KLPU SPLICEOFFSET=<mm>`
 - `;P2KLPU SPLICE_OFFSET=<mm>` (alias of `SPLICEOFFSET`)
+
+About `FILAMENTOVERRIDE`:
+- This changes the material name used for `MATERIAL_<FROM>_<TO>_h_c_k` matching and for Omega’s material table.
+- Use it to introduce custom names like `PETG-MATTE` / `PETG2` even if PrusaSlicer’s `filament_type` is more generic.
+
+Material aliases (Spoolman-style, recommended):
+- You can attach a stable material token to the filament profile itself, so it follows whichever tool/extruder it is assigned to.
+- Add `p2klpu_material` per-filament in PrusaSlicer metadata; the tool reads (first found wins): `custom_parameters_filament`, `filament_custom_variables`, `filament_notes`.
+- Supported formats per filament entry:
+	- JSON object (common in `custom_parameters_filament`): `{"p2klpu_material":"PETG-MATTE"}`
+	- Key/value text (notes/custom variables): `p2klpu_material=PETG-MATTE`
 
 About `AUTOLOADINGOFFSET`:
 - In connected mode, Palette schedules splices/pings in terms of “mm of filament fed”.
@@ -161,6 +174,9 @@ Klipper-oriented normalization:
 
 Spoolman integration:
 - `;P2KLPU SPOOLMAN_SET_ACTIVE_SPOOL=0|1`
+	- When enabled, the tool looks for per-filament spool IDs in PrusaSlicer metadata (`custom_parameters_filament`, `filament_custom_variables`, or `filament_notes`).
+	- Supported key names inside those fields: `spoolman_id`, `spool_id`, `target_spool`.
+	- When a tool change happens, it emits `SET_ACTIVE_SPOOL ID=<n>` (Klipper macro) when an ID is available for that tool.
 
 OctoPrint/Marlin compatibility:
 - `;P2KLPU OCTOPRINT_STRIP_O_COMMANDS=0|1`

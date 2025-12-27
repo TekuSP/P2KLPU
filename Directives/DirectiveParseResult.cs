@@ -50,6 +50,7 @@ sealed record DirectiveParseResult(
         var algoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.AlgorithmOverrides);
         var diAlgoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.DiAlgorithmOverrides);
         var materialAlgoOverrides = new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(options.MaterialAlgorithmOverrides);
+        var filamentTypes = new List<string>(options.FilamentTypes);
 
         foreach (var d in Directives)
         {
@@ -88,6 +89,24 @@ sealed record DirectiveParseResult(
             {
                 if (TryParseBool(d.Value, out var b))
                     rawMmuMode = b;
+                continue;
+            }
+
+            // Filament type override: changes the material name used for MATERIAL_<FROM>_<TO> matching.
+            // Supported forms:
+            //  ;P2KLPU FILAMENTOVERRIDE_DI1=PETG-MATTE
+            //  ;P2KLPU FILAMENTOVERRIDE_1=PETG-MATTE
+            //  ;P2KLPU FILAMENTOVERRIDE1=PETG-MATTE
+            // The plain form ';P2KLPU FILAMENTOVERRIDE=<name>' applies to DI1.
+            if (key.StartsWith("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase))
+            {
+                if (TryParseFilamentOverride(d.Key, d.Value, out var di, out var name))
+                {
+                    var idx = di - 1;
+                    while (filamentTypes.Count <= idx)
+                        filamentTypes.Add("");
+                    filamentTypes[idx] = name;
+                }
                 continue;
             }
 
@@ -269,7 +288,7 @@ sealed record DirectiveParseResult(
         {
             DefaultAlgorithm = defaultAlgo,
             SpliceOffsetMm = spliceOffset,
-            FilamentTypes = options.FilamentTypes,
+            FilamentTypes = filamentTypes,
             EmitSetActiveSpool = emitSetActiveSpool,
             RawMmuMode = rawMmuMode,
             PrinterProfileHex = printerProfile,
@@ -294,6 +313,93 @@ sealed record DirectiveParseResult(
             DiAlgorithmOverrides = diAlgoOverrides,
             MaterialAlgorithmOverrides = materialAlgoOverrides
         };
+
+        static bool TryParseFilamentOverride(string rawKey, string rawValue, out int di, out string name)
+        {
+            di = 1;
+            name = "";
+
+            var key = rawKey.Trim();
+            var upper = key.ToUpperInvariant();
+            var value = rawValue.Trim();
+
+            // Allow DI index to be specified inside the value for the plain key.
+            // Examples:
+            //  FILAMENTOVERRIDE=DI2=PETG-MATTE
+            //  FILAMENTOVERRIDE=DI2:PETG-MATTE
+            if (upper.Equals("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase)
+                && (value.StartsWith("DI", StringComparison.OrdinalIgnoreCase) || value.StartsWith("di", StringComparison.OrdinalIgnoreCase)))
+            {
+                var v = value;
+                var sep = v.IndexOf('=');
+                if (sep < 0) sep = v.IndexOf(':');
+                if (sep > 0)
+                {
+                    var left = v[..sep].Trim();
+                    var right = v[(sep + 1)..].Trim();
+                    if (TryParseDirectInput(left, out var input) && !string.IsNullOrWhiteSpace(right))
+                    {
+                        di = input;
+                        name = right;
+                        return true;
+                    }
+                }
+            }
+
+            // Key-encoded DI index.
+            // FILAMENTOVERRIDE_DI2, FILAMENTOVERRIDE_2, FILAMENTOVERRIDE2
+            var k = upper;
+
+            if (k.Equals("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(value))
+                    return false;
+                di = 1;
+                name = value;
+                return true;
+            }
+
+            const string diPrefix = "FILAMENTOVERRIDE_DI";
+            const string underscorePrefix = "FILAMENTOVERRIDE_";
+            const string barePrefix = "FILAMENTOVERRIDE";
+
+            if (k.StartsWith(diPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var num = k[diPrefix.Length..].Trim();
+                if (int.TryParse(num, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0 && !string.IsNullOrWhiteSpace(value))
+                {
+                    di = n;
+                    name = value;
+                    return true;
+                }
+                return false;
+            }
+
+            if (k.StartsWith(underscorePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var num = k[underscorePrefix.Length..].Trim();
+                if (int.TryParse(num, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0 && !string.IsNullOrWhiteSpace(value))
+                {
+                    di = n;
+                    name = value;
+                    return true;
+                }
+                return false;
+            }
+
+            if (k.StartsWith(barePrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                var num = k[barePrefix.Length..].Trim();
+                if (int.TryParse(num, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0 && !string.IsNullOrWhiteSpace(value))
+                {
+                    di = n;
+                    name = value;
+                    return true;
+                }
+            }
+
+            return false;
+        }
 
         static bool TryParseBool(string text, out bool value)
         {
