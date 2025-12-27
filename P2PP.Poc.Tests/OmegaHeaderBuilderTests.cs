@@ -1,0 +1,32 @@
+using System;
+using System.Collections.Generic;
+using Xunit;
+
+public sealed class OmegaHeaderBuilderTests
+{
+    [Fact]
+    public void BuildPalette2Header_ContainsCoreOmegaLinesAndCounts()
+    {
+        var input = new OmegaHeaderBuildInput(
+            JobName: "my print",
+            PrinterProfileHex: "50325050494e464f",
+            AutoloadingOffsetMm: 0,
+            TotalEffectivePositiveExtrusionMm: 10,
+            FilamentTypes: new[] { "PETG", "PLA" },
+            FilamentColorsHex: new[] { "ff0000", "00ff00" },
+            ToolsUsed: new[] { 0, 1 },
+            Splices: new[] { new RawMmuSplice(1, 0, 1, 5, 5) },
+            Pings: new[] { new RawMmuPing(1, 400) },
+            AlgorithmTable: new[] { new OmegaAlgorithmEntry(1, 2, new SpliceAlgorithm(3, -1, -6), "test") });
+
+        var header = OmegaHeaderBuilder.BuildPalette2Header(input);
+
+        Assert.Contains("O21 D0014", header);
+        Assert.Contains("O22 D50325050494e464f", header);
+        Assert.Contains("O26 D0001", header);
+        Assert.Contains("O27 D0001", header);
+        Assert.Contains("O30 D0 D40a00000", header); // 5.0f => 0x40a00000
+        Assert.Contains("O32 D12 D0003 Dffff Dfffa", header);
+        Assert.Contains("O1 Dmy_print D00000005", header); // last splice location 5mm
+    }
+}
