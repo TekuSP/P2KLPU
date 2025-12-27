@@ -12,6 +12,14 @@ using System.Collections.Generic;
 /// <seealso cref="DirectiveBlock"/>
 static class P2klpuDirectiveScanner
 {
+    /// <summary>
+    /// Parses all <c>;P2KLPU ...</c> directives found anywhere in the file.
+    /// </summary>
+    /// <remarks>
+    /// Legacy <c>;P2PP</c> directives are intentionally ignored.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>A list of parsed directives in file order.</returns>
     public static IReadOnlyList<Directive> ParseAll(string[] lines)
     {
         var directives = new List<Directive>();

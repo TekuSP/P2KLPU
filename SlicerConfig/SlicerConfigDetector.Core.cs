@@ -13,6 +13,11 @@ using System.Globalization;
 /// <seealso cref="RawMmuScanner"/>
 static partial class SlicerConfigDetector
 {
+    /// <summary>
+    /// Attempts to read PrusaSlicer filament types from the embedded config footer.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>A list of filament type strings (one per tool) or an empty list when unavailable.</returns>
     public static IReadOnlyList<string> TryReadFilamentTypes(string[] lines)
     {
         // PrusaSlicer writes this in the config footer:
@@ -42,6 +47,12 @@ static partial class SlicerConfigDetector
         return Array.Empty<string>();
     }
 
+    /// <summary>
+    /// Attempts to read an integer PrusaSlicer config footer value.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <param name="key">The key name (e.g., <c>single_extruder_multi_material</c>).</param>
+    /// <returns>The parsed integer when present; otherwise <see langword="null"/>.</returns>
     public static int? TryReadPrusaInt(string[] lines, string key)
     {
         // PrusaSlicer writes settings in the config footer like:
@@ -68,6 +79,11 @@ static partial class SlicerConfigDetector
         return null;
     }
 
+    /// <summary>
+    /// Heuristically detects whether the file already appears to contain a Mosaic Omega header.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns><see langword="true"/> when an Omega header is detected near the top of the file.</returns>
     public static bool LooksLikeOmegaProcessed(string[] lines)
     {
         // Omega header lines are Mosaic "O" commands near the beginning.
@@ -87,6 +103,11 @@ static partial class SlicerConfigDetector
         return false;
     }
 
+    /// <summary>
+    /// Heuristically detects whether the file contains tool change commands.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns><see langword="true"/> when <c>Tn</c> or <c>ACTIVATE_EXTRUDER</c> is detected in the file prefix.</returns>
     public static bool LooksLikeHasToolChanges(string[] lines)
     {
         // Heuristic: any non-comment line starting with T<number> or ACTIVATE_EXTRUDER.

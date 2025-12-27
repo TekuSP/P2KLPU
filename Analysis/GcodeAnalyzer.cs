@@ -13,6 +13,16 @@ using System.Linq;
 /// <seealso cref="GcodeAnalysis"/>
 static class GcodeAnalyzer
 {
+    /// <summary>
+    /// Analyzes the provided G-code lines and computes splices/pings plus diagnostic warnings.
+    /// </summary>
+    /// <remarks>
+    /// In RAW_MMU mode, this uses <see cref="RawMmuScanner"/> so analysis matches the rewrite pipeline's
+    /// effective extrusion accounting.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <param name="options">Processing options affecting parsing and algorithm selection.</param>
+    /// <returns>A computed <see cref="GcodeAnalysis"/> summary.</returns>
     public static GcodeAnalysis Analyze(string[] lines, Options options)
     {
         var warnings = new List<string>();

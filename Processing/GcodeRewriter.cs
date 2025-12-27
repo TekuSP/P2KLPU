@@ -96,6 +96,18 @@ static class GcodeRewriter
         }
     }
 
+    /// <summary>
+    /// Rewrites <c>M0</c>/<c>M1</c> to a Klipper-friendly pause when enabled.
+    /// </summary>
+    /// <remarks>
+    /// In Klipper, <c>PAUSE</c> is typically implemented by a macro. When <see cref="Options.DropM0M1AfterO1"/>
+    /// is enabled, this can also drop redundant pauses after an <c>O1</c> barrier.
+    /// </remarks>
+    /// <param name="rawLine">Raw input line (may include comments).</param>
+    /// <param name="options">Processing options.</param>
+    /// <param name="lastNonCommentCommand">The last emitted non-comment command, used for drop-after-O1 behavior.</param>
+    /// <param name="outputLines">The rewritten output lines when applied.</param>
+    /// <returns><see langword="true"/> when the line was rewritten or dropped; otherwise <see langword="false"/>.</returns>
     public static bool TryRewriteM0M1(string rawLine, Options options, string lastNonCommentCommand, out IReadOnlyList<string> outputLines)
     {
         outputLines = Array.Empty<string>();
@@ -133,6 +145,18 @@ static class GcodeRewriter
         return true;
     }
 
+    /// <summary>
+    /// Rewrites the ping-block sync dwell (usually a zero-length <c>G4</c>) to a user-specified macro.
+    /// </summary>
+    /// <remarks>
+    /// Some workflows require a custom synchronization action at the start of a ping block.
+    /// When <see cref="Options.SyncPingMacroOverride"/> is set, this replaces a zero-length dwell with that macro.
+    /// </remarks>
+    /// <param name="rawLine">Raw input line (may include comments).</param>
+    /// <param name="options">Processing options.</param>
+    /// <param name="inPingBlock">Whether the current line is inside an emitted ping block.</param>
+    /// <param name="outputLines">The rewritten output lines when applied.</param>
+    /// <returns><see langword="true"/> when the line was rewritten; otherwise <see langword="false"/>.</returns>
     public static bool TryRewritePingSync(string rawLine, Options options, bool inPingBlock, out IReadOnlyList<string> outputLines)
     {
         outputLines = Array.Empty<string>();

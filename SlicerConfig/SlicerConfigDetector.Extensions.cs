@@ -62,6 +62,15 @@ static partial class SlicerConfigDetector
         return result;
     }
 
+    /// <summary>
+    /// Attempts to read PrusaSlicer filament colors from the embedded config footer.
+    /// </summary>
+    /// <remarks>
+    /// PrusaSlicer typically emits <c>filament_colour</c> as a semicolon-separated list of hex colors.
+    /// This returns hex strings without the leading <c>#</c>.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>A list of hex color strings (one per tool) or an empty list when unavailable.</returns>
     public static IReadOnlyList<string> TryReadFilamentColors(string[] lines)
     {
         // PrusaSlicer footer line typically:

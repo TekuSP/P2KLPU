@@ -9,6 +9,15 @@ using System;
 /// <seealso cref="FirmwareFlavor"/>
 static class FirmwareFlavorDetector
 {
+    /// <summary>
+    /// Detects the firmware flavor from PrusaSlicer embedded <c>gcode_flavor</c> comments.
+    /// </summary>
+    /// <remarks>
+    /// This is the only supported source of truth for firmware selection (no directive-based forcing).
+    /// When the flavor is missing, the detector returns a conservative default.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>The detected firmware flavor.</returns>
     public static FirmwareFlavor Detect(string[] lines)
     {
         // PrusaSlicer typically writes this in the config footer:

@@ -8,5 +8,6 @@
 /// <seealso cref="AlgorithmResolver"/>
 readonly record struct TransitionKey(int FromInput, int ToInput)
 {
+    /// <inheritdoc />
     public override string ToString() => $"{FromInput}->{ToInput}";
 }

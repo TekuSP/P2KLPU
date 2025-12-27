@@ -10,6 +10,7 @@ using System.Globalization;
 /// <seealso cref="AlgorithmResolver"/>
 readonly record struct SpliceAlgorithm(int Heating, int Compression, int Cooling)
 {
+    /// <inheritdoc />
     public override string ToString() => $"{Heating},{Compression},{Cooling}";
 
     /// <summary>

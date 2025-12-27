@@ -11,6 +11,18 @@ using System;
 /// <seealso cref="MaterialTransitionKey"/>
 static class AlgorithmResolver
 {
+    /// <summary>
+    /// Resolves the splice algorithm for a specific transition, returning both the algorithm and an explanation.
+    /// </summary>
+    /// <remarks>
+    /// The returned <see cref="AlgorithmSelection"/> includes a human-readable reason describing which rule matched.
+    /// </remarks>
+    /// <param name="options">Processing options containing default and override algorithm tables.</param>
+    /// <param name="fromInput">1-based source input.</param>
+    /// <param name="toInput">1-based destination input.</param>
+    /// <param name="fromMaterial">Material name for the source tool/input (when known).</param>
+    /// <param name="toMaterial">Material name for the destination tool/input (when known).</param>
+    /// <returns>The selected algorithm and a reason string describing why it was chosen.</returns>
     public static AlgorithmSelection Resolve(Options options, int fromInput, int toInput, string fromMaterial, string toMaterial)
     {
         // Priority (most specific first): explicit ALGO override (1-2), DI override, material override, default.

@@ -7,5 +7,6 @@
 /// <seealso cref="AlgorithmResolver"/>
 sealed record MaterialTransitionKey(string From, string To)
 {
+    /// <inheritdoc />
     public override string ToString() => $"{From}->{To}";
 }

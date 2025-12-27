@@ -11,6 +11,11 @@ using System.Collections.Generic;
 /// <seealso cref="DirectiveParseResult"/>
 static class DirectiveBlock
 {
+    /// <summary>
+    /// Attempts to locate and parse the first <c>;P2KLPU BEGIN</c> / <c>;P2KLPU END</c> directive block.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>A parse result containing the block range and parsed directives when present.</returns>
     public static DirectiveParseResult TryParse(string[] lines)
     {
         // Markers are comments so printers ignore them.

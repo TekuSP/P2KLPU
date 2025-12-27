@@ -24,6 +24,12 @@ sealed record GcodeAnalysis(
     IReadOnlyList<PingEvent> Pings,
     IReadOnlyList<string> Warnings)
 {
+    /// <summary>
+    /// Formats this analysis as a console-friendly multi-line report.
+    /// </summary>
+    /// <param name="displayName">The display name shown in the report header.</param>
+    /// <param name="verbose">When true, includes additional details (e.g., more pings).</param>
+    /// <returns>A formatted report string.</returns>
     public string ToConsoleString(string displayName, bool verbose)
     {
         var sb = new StringBuilder();

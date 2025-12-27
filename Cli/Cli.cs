@@ -14,6 +14,14 @@ using System.IO;
 /// <seealso cref="Options"/>
 static class Cli
 {
+    /// <summary>
+    /// Parses CLI arguments into an <see cref="Options"/> instance.
+    /// </summary>
+    /// <remarks>
+    /// This CLI is intentionally minimal; most configuration is expected to be provided via in-file directives.
+    /// </remarks>
+    /// <param name="args">Command line arguments.</param>
+    /// <returns>A parse result including either options or an error/help message.</returns>
     public static CliResult Parse(string[] args)
     {
         var positional = new List<string>();
