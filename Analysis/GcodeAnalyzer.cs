@@ -60,18 +60,23 @@ static class GcodeAnalyzer
                 }
             }
 
-            // Still scan for O31 commands for compatibility diagnostics.
+            // In RAW_MMU mode, pings are *planned* (and inserted during rewrite) rather than typically
+            // being present as O31 commands in the input.
+            foreach (var p in scan.Pings)
+            {
+                var mm = p.EffectiveLocationMm + options.AutoloadingOffsetMm;
+                pings.Add(new PingEvent(
+                    RawCommand: "O31 " + OmegaEncoding.HexifyFloat(mm),
+                    PositionMm: mm));
+            }
+
+            // Still scan toolchange styles for diagnostics.
             for (var i = 0; i < lines.Length; i++)
             {
                 var raw = lines[i];
                 if (string.IsNullOrWhiteSpace(raw))
                     continue;
                 var line = StripComment(raw);
-                if (line.StartsWith("O31", StringComparison.OrdinalIgnoreCase))
-                {
-                    if (TryParseO31PingMm(line, out var mm))
-                        pings.Add(new PingEvent(RawCommand: line, PositionMm: mm));
-                }
                 if (TryParseToolChange(line, out _))
                     sawTToolchange = true;
                 if (line.StartsWith("ACTIVATE_EXTRUDER", StringComparison.OrdinalIgnoreCase))

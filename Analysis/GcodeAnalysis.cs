@@ -54,7 +54,7 @@ sealed record GcodeAnalysis(
         }
 
         sb.AppendLine($"Splices detected: {Splices.Count}");
-        sb.AppendLine($"Palette pings (O31) detected: {Pings.Count}");
+        sb.AppendLine($"Palette pings (O31) {(TotalEffectivePositiveExtrusionMm.HasValue ? "planned" : "detected")}: {Pings.Count}");
         if (Pings.Count > 0)
         {
             sb.AppendLine("O31 encodes a ping location along the extruded filament.");
