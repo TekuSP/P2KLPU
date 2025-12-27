@@ -128,6 +128,61 @@ public sealed class RawMmuScannerTests
         Assert.Equal("X[5,6] Y[5,6]", scan.TowerBounds!.Value.ToString());
     }
 
+    [Fact]
+    public void Scan_FallbacksToToolchangeBlocks_ForTowerDetection_WhenTypeMarkersMissing()
+    {
+        var lines = new[]
+        {
+            "M83",
+            "T0",
+            "G1 X0 Y0 E1.0",
+            "; TOOLCHANGE START",
+            "G1 X10 Y10 E2.0 ; tower move",
+            "T1",
+            "G1 X11 Y9 E3.0 ; tower move",
+            "; TOOLCHANGE END",
+            "G1 X100 Y100 E4.0 ; model move",
+        };
+
+        var scan = RawMmuScanner.Scan(lines, DefaultOptions() with { MmuToolchangeWindowLines = 0 });
+
+        Assert.False(scan.SawTypeMarkers);
+        Assert.True(scan.SawExplicitToolchangeBlocks);
+        Assert.Equal(TowerDetectionMethod.ToolchangeBlocks, scan.TowerDetection);
+        Assert.Equal(10.0, scan.TotalEffectivePositiveExtrusionMm);
+        Assert.Equal(5.0, scan.TowerEffectivePositiveExtrusionMm);
+        Assert.Equal(5.0, scan.ModelEffectivePositiveExtrusionMm);
+        Assert.Equal("X[10,11] Y[9,10]", scan.TowerBounds!.Value.ToString());
+    }
+
+    [Fact]
+    public void Scan_FallbacksToHeuristicWindows_ForTowerDetection_WhenNoMarkersPresent()
+    {
+        // No ;TYPE and no TOOLCHANGE markers. We still want to classify tower extrusion
+        // close to toolchanges as tower, as a best-effort fallback.
+        var lines = new[]
+        {
+            "M83",
+            "T0",
+            "G1 X0 Y0 E1.0",
+            "T1",
+            "G1 X10 Y10 E2.0 ; likely tower",
+            "G1 X11 Y11 E3.0 ; likely tower",
+            "G1 X200 Y200 E4.0 ; model",
+        };
+
+        var scan = RawMmuScanner.Scan(lines, DefaultOptions() with { MmuToolchangeWindowLines = 2 });
+
+        Assert.False(scan.SawTypeMarkers);
+        Assert.False(scan.SawExplicitToolchangeBlocks);
+        Assert.True(scan.UsedHeuristicToolchangeWindows);
+        Assert.Equal(TowerDetectionMethod.HeuristicWindows, scan.TowerDetection);
+        Assert.Equal(10.0, scan.TotalEffectivePositiveExtrusionMm);
+        Assert.Equal(5.0, scan.TowerEffectivePositiveExtrusionMm);
+        Assert.Equal(5.0, scan.ModelEffectivePositiveExtrusionMm);
+        Assert.Equal("X[10,11] Y[10,11]", scan.TowerBounds!.Value.ToString());
+    }
+
     private static Options DefaultOptions() => new(
         InputPath: "in.gcode",
         OutputPath: "out.gcode",

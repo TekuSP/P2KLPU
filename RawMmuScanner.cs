@@ -20,6 +20,10 @@ static class RawMmuScanner
         var inWipeTower = false;
         var sawTypeMarkers = false;
 
+        var sawExplicitToolchangeBlocks = false;
+        var usedHeuristicToolchangeWindows = false;
+        var sawAnyToolchange = false;
+
         var currentTool = -1;
         var previousSpliceLocation = 0.0;
         var spliceIndex = 0;
@@ -73,6 +77,7 @@ static class RawMmuScanner
                 {
                     inToolchange = true;
                     inExplicitToolchangeBlock = true;
+                    sawExplicitToolchangeBlocks = true;
                 }
                 else if (trimmed.Contains("CP TOOLCHANGE END", StringComparison.OrdinalIgnoreCase)
                     || trimmed.Contains("TOOLCHANGE END", StringComparison.OrdinalIgnoreCase))
@@ -109,6 +114,7 @@ static class RawMmuScanner
 
             if (TryParseToolChange(code, out var newTool))
             {
+                sawAnyToolchange = true;
                 if (currentTool >= 0 && newTool != currentTool)
                 {
                     // Only enable heuristic toolchange window if we are not inside an explicit toolchange block.
@@ -116,6 +122,7 @@ static class RawMmuScanner
                     {
                         inToolchange = true;
                         toolchangeLinesLeft = options.MmuToolchangeWindowLines;
+                        usedHeuristicToolchangeWindows = options.MmuToolchangeWindowLines > 0;
                     }
 
                     var location = totalEffectivePositiveExtrusion + options.SpliceOffsetMm;
@@ -141,6 +148,7 @@ static class RawMmuScanner
                 var tool = TryParseKlipperActivateExtruder(code);
                 if (tool.HasValue)
                 {
+                    sawAnyToolchange = true;
                     var newTool2 = tool.Value;
                     if (currentTool >= 0 && newTool2 != currentTool)
                     {
@@ -148,6 +156,7 @@ static class RawMmuScanner
                         {
                             inToolchange = true;
                             toolchangeLinesLeft = options.MmuToolchangeWindowLines;
+                            usedHeuristicToolchangeWindows = options.MmuToolchangeWindowLines > 0;
                         }
 
                         var location = totalEffectivePositiveExtrusion + options.SpliceOffsetMm;
@@ -166,17 +175,6 @@ static class RawMmuScanner
                     if (currentTool >= 0)
                         toolsUsed.Add(currentTool);
                     continue;
-                }
-            }
-
-            if (inToolchange)
-            {
-                // If we are inside an explicit toolchange block, stay inside until we see END.
-                if (!inExplicitToolchangeBlock)
-                {
-                    toolchangeLinesLeft--;
-                    if (toolchangeLinesLeft <= 0)
-                        inToolchange = false;
                 }
             }
 
@@ -214,28 +212,28 @@ static class RawMmuScanner
                     if (positiveRaw > 0)
                     {
                         totalEffectivePositiveExtrusion += positiveRaw;
-                        if (inWipeTower)
+
+                        var isTowerMove = IsTowerExtrusionMove(
+                            sawTypeMarkers: sawTypeMarkers,
+                            inWipeTower: inWipeTower,
+                            inExplicitToolchangeBlock: inExplicitToolchangeBlock,
+                            inToolchange: inToolchange,
+                            code: code);
+
+                        if (isTowerMove)
                             towerEffectivePositiveExtrusion += positiveRaw;
                         else
                             modelEffectivePositiveExtrusion += positiveRaw;
 
-                        if (inWipeTower)
+                        if (isTowerMove && TryGetParam(code, 'X', out var x) && TryGetParam(code, 'Y', out var y))
                         {
-                            // Record simple XY bounds of tower extrusion moves (helps debug rotated/offset towers).
-                            if (TryGetParam(code, 'X', out var x) || TryGetParam(code, 'Y', out var y))
-                            {
-                                // If one axis is missing, keep prior (we can't reliably infer position here), so only update when both exist.
-                                if (TryGetParam(code, 'X', out x) && TryGetParam(code, 'Y', out y))
-                                {
-                                    towerBounds = towerBounds is null
-                                        ? new AxisAlignedBounds2D(x, y, x, y)
-                                        : new AxisAlignedBounds2D(
-                                            MinX: Math.Min(towerBounds.Value.MinX, x),
-                                            MinY: Math.Min(towerBounds.Value.MinY, y),
-                                            MaxX: Math.Max(towerBounds.Value.MaxX, x),
-                                            MaxY: Math.Max(towerBounds.Value.MaxY, y));
-                                }
-                            }
+                            towerBounds = towerBounds is null
+                                ? new AxisAlignedBounds2D(x, y, x, y)
+                                : new AxisAlignedBounds2D(
+                                    MinX: Math.Min(towerBounds.Value.MinX, x),
+                                    MinY: Math.Min(towerBounds.Value.MinY, y),
+                                    MaxX: Math.Max(towerBounds.Value.MaxX, x),
+                                    MaxY: Math.Max(towerBounds.Value.MaxY, y));
                         }
 
                         if (pingPlanner.ShouldInsertPing(totalEffectivePositiveExtrusion))
@@ -247,23 +245,76 @@ static class RawMmuScanner
                     }
                 }
             }
+
+            // Heuristic toolchange window: count down after processing this line.
+            // This makes the meaning "N subsequent lines" intuitive and avoids prematurely ending
+            // the window before the Nth line is processed.
+            if (inToolchange && !inExplicitToolchangeBlock)
+            {
+                toolchangeLinesLeft--;
+                if (toolchangeLinesLeft <= 0)
+                    inToolchange = false;
+            }
         }
 
         // Stable ordering is useful for deterministic headers.
         var toolsUsedList = new List<int>(toolsUsed);
         toolsUsedList.Sort();
 
+        var detection = TowerDetectionMethod.None;
+        if (sawTypeMarkers)
+            detection = TowerDetectionMethod.TypeMarkers;
+        else if (sawExplicitToolchangeBlocks)
+            detection = TowerDetectionMethod.ToolchangeBlocks;
+        else if (usedHeuristicToolchangeWindows)
+            detection = TowerDetectionMethod.HeuristicWindows;
+
+        // When no tower signals exist, treat everything as model.
+        if (detection == TowerDetectionMethod.None)
+        {
+            towerEffectivePositiveExtrusion = 0.0;
+            modelEffectivePositiveExtrusion = totalEffectivePositiveExtrusion;
+            towerBounds = null;
+        }
+
         return new RawMmuScanResult(
             ExtrusionIsAbsolute: extrusionAbsolute,
             TotalPositiveExtrusionMm: totalPositiveExtrusion,
             TotalEffectivePositiveExtrusionMm: totalEffectivePositiveExtrusion,
-            TowerEffectivePositiveExtrusionMm: sawTypeMarkers ? towerEffectivePositiveExtrusion : 0.0,
-            ModelEffectivePositiveExtrusionMm: sawTypeMarkers ? modelEffectivePositiveExtrusion : totalEffectivePositiveExtrusion,
+            TowerEffectivePositiveExtrusionMm: towerEffectivePositiveExtrusion,
+            ModelEffectivePositiveExtrusionMm: modelEffectivePositiveExtrusion,
             IgnoredToolchangeEOnlyPositiveExtrusionMm: ignoredToolchangeEOnlyPositiveExtrusion,
-            TowerBounds: sawTypeMarkers ? towerBounds : null,
+            TowerBounds: towerBounds,
+            TowerDetection: detection,
+            SawTypeMarkers: sawTypeMarkers,
+            SawExplicitToolchangeBlocks: sawExplicitToolchangeBlocks,
+            UsedHeuristicToolchangeWindows: usedHeuristicToolchangeWindows,
+            SawAnyToolchange: sawAnyToolchange,
             ToolsUsed: toolsUsedList,
             Splices: splices,
             Pings: pings);
+    }
+
+    private static bool IsTowerExtrusionMove(bool sawTypeMarkers, bool inWipeTower, bool inExplicitToolchangeBlock, bool inToolchange, string code)
+    {
+        // Best signal: PrusaSlicer TYPE markers.
+        if (sawTypeMarkers)
+            return inWipeTower;
+
+        // Fallback: if toolchange blocks exist, tower extrusion is typically emitted inside them.
+        if (inExplicitToolchangeBlock)
+            return HasAnyAxisMove(code);
+
+        // Last resort: if we are in a heuristic toolchange window, count XY extrusion as tower.
+        if (inToolchange)
+            return HasAnyAxisMove(code);
+
+        return false;
+
+        static bool HasAnyAxisMove(string gcode)
+        {
+            return HasParam(gcode, 'X') || HasParam(gcode, 'Y');
+        }
     }
 
     private enum PrusaType
@@ -294,8 +345,7 @@ static class RawMmuScanner
             type = PrusaType.WipeTower;
             return true;
         }
-        if (v.Equals("Prime tower", StringComparison.OrdinalIgnoreCase)
-            || v.Equals("Prime tower", StringComparison.OrdinalIgnoreCase))
+        if (v.Equals("Prime tower", StringComparison.OrdinalIgnoreCase))
         {
             type = PrusaType.PrimeTower;
             return true;

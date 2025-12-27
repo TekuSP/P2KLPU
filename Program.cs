@@ -1177,6 +1177,15 @@ static class GcodeAnalyzer
             if (scan.ExtrusionIsAbsolute)
                 warnings.Add("Detected absolute extrusion (M82). RAW_MMU mode approximates effective extrusion using deltas.");
 
+            if (scan.TowerDetection == TowerDetectionMethod.None)
+            {
+                warnings.Add("Could not detect wipe tower regions (no PrusaSlicer ;TYPE markers and no toolchange blocks/windows). Tower/model breakdown unavailable.");
+            }
+            else if (scan.TowerDetection != TowerDetectionMethod.TypeMarkers)
+            {
+                warnings.Add("No PrusaSlicer ;TYPE markers detected; tower/model breakdown inferred from toolchange blocks/windows (best-effort).");
+            }
+
             return new GcodeAnalysis(
                 ExtrusionIsAbsolute: scan.ExtrusionIsAbsolute,
                 TotalPositiveExtrusionMm: scan.TotalPositiveExtrusionMm,

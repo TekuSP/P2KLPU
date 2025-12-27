@@ -9,9 +9,22 @@ sealed record RawMmuScanResult(
     double ModelEffectivePositiveExtrusionMm,
     double IgnoredToolchangeEOnlyPositiveExtrusionMm,
     AxisAlignedBounds2D? TowerBounds,
+    TowerDetectionMethod TowerDetection,
+    bool SawTypeMarkers,
+    bool SawExplicitToolchangeBlocks,
+    bool UsedHeuristicToolchangeWindows,
+    bool SawAnyToolchange,
     IReadOnlyList<int> ToolsUsed,
     IReadOnlyList<RawMmuSplice> Splices,
     IReadOnlyList<RawMmuPing> Pings);
+
+enum TowerDetectionMethod
+{
+    None,
+    TypeMarkers,
+    ToolchangeBlocks,
+    HeuristicWindows,
+}
 
 readonly record struct AxisAlignedBounds2D(double MinX, double MinY, double MaxX, double MaxY)
 {
