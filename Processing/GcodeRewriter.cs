@@ -2,8 +2,28 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 
+/// <summary>
+/// Contains small, targeted G-code rewrites needed for firmware portability.
+/// </summary>
+/// <remarks>
+/// This is intentionally narrow in scope: it rewrites only known problematic/portable constructs
+/// (for example, converting <c>G4</c> dwell forms for Klipper compatibility).
+/// </remarks>
+/// <seealso cref="FirmwareFlavor"/>
+/// <seealso cref="Options"/>
 static class GcodeRewriter
 {
+    /// <summary>
+    /// Rewrites a <c>G4</c> dwell line for Klipper when needed.
+    /// </summary>
+    /// <remarks>
+    /// Klipper typically accepts <c>G4 P&lt;ms&gt;</c>. Some slicers emit <c>G4 S&lt;sec&gt;</c> or use <c>G4 S0</c>/<c>G4 P0</c>
+    /// as a synchronization barrier; in that case, this can optionally emit <c>M400</c> instead.
+    /// </remarks>
+    /// <param name="rawLine">The raw input line (may include comments).</param>
+    /// <param name="options">Options controlling firmware targeting and barrier behavior.</param>
+    /// <param name="outputLines">The rewritten output lines when the rewrite is applied.</param>
+    /// <returns><see langword="true"/> when the line was rewritten; otherwise <see langword="false"/>.</returns>
     public static bool TryRewriteG4(string rawLine, Options options, out IReadOnlyList<string> outputLines)
     {
         outputLines = Array.Empty<string>();

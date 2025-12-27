@@ -2,8 +2,25 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 
+/// <summary>
+/// High-level processing entrypoint for the .NET POC.
+/// </summary>
+/// <remarks>
+/// In RAW_MMU mode, this delegates to <see cref="RawMmuTwoPassProcessor"/> and then normalizes the output.
+/// Otherwise, it performs a lightweight normalization pass and adds provenance comments.
+/// </remarks>
+/// <seealso cref="RawMmuTwoPassProcessor"/>
 static class P2ppNetProcessor
 {
+    /// <summary>
+    /// Processes input G-code lines according to the selected options.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <param name="options">Processing options.</param>
+    /// <param name="displayName">A user-facing name used for provenance comments.</param>
+    /// <param name="sourcePath">Original source path used for provenance comments.</param>
+    /// <param name="timestampUtc">Timestamp used for provenance comments.</param>
+    /// <returns>Processed output lines.</returns>
     public static IReadOnlyList<string> ProcessLines(
         string[] lines,
         Options options,

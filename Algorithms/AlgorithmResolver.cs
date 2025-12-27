@@ -1,7 +1,14 @@
 using System;
 
-sealed record AlgorithmSelection(SpliceAlgorithm Algorithm, string Reason);
-
+/// <summary>
+/// Resolves splice algorithms with an explainable rule priority.
+/// </summary>
+/// <remarks>
+/// Priority (most specific first): explicit input transition override (<c>ALGO 1-2</c>),
+/// direct-input override (<c>MATERIAL_DI1_DI2</c>), material override (<c>MATERIAL_PETG_PLA</c>), then default.
+/// </remarks>
+/// <seealso cref="AlgorithmSelection"/>
+/// <seealso cref="MaterialTransitionKey"/>
 static class AlgorithmResolver
 {
     public static AlgorithmSelection Resolve(Options options, int fromInput, int toInput, string fromMaterial, string toMaterial)
@@ -26,9 +33,4 @@ static class AlgorithmResolver
 
         return new AlgorithmSelection(options.DefaultAlgorithm, "default algorithm");
     }
-}
-
-sealed record MaterialTransitionKey(string From, string To)
-{
-    public override string ToString() => $"{From}->{To}";
 }

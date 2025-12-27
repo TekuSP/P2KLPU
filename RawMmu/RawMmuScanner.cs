@@ -2,8 +2,30 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 
+/// <summary>
+/// Scans raw MMU-style G-code (single-extruder toolchange semantics) and produces a model of
+/// tool usage, effective extrusion, splices, pings, and (when possible) wipe-tower vs model breakdown.
+/// </summary>
+/// <remarks>
+/// This is pass 1 of the two-pass RAW_MMU pipeline.
+///
+/// The scan intentionally excludes toolchange logistics (typically large E-only moves around tool changes)
+/// from the "effective" extrusion accumulator, since connected-mode splice and ping planning should be based
+/// on print-relevant filament usage.
+///
+/// Tower vs model attribution prefers PrusaSlicer/Slic3r <c>;TYPE:</c> markers; when those markers are absent,
+/// the scanner may fall back to heuristics and will report reduced certainty via warnings.
+/// </remarks>
+/// <seealso cref="RawMmuTwoPassProcessor"/>
+/// <seealso cref="RawMmuScanResult"/>
 static class RawMmuScanner
 {
+    /// <summary>
+    /// Performs a single scan over the input lines, returning a computed RAW_MMU plan.
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <param name="options">Processing options that affect ping planning and detection heuristics.</param>
+    /// <returns>A scan result describing effective extrusion, splices, pings, and diagnostics.</returns>
     public static RawMmuScanResult Scan(string[] lines, Options options)
     {
         var extrusionAbsolute = false;
@@ -317,13 +339,6 @@ static class RawMmuScanner
         }
     }
 
-    private enum PrusaType
-    {
-        Other,
-        WipeTower,
-        PrimeTower,
-    }
-
     private static bool TryParsePrusaType(string trimmedCommentLine, out PrusaType type)
     {
         type = PrusaType.Other;
@@ -437,34 +452,5 @@ static class RawMmuScanner
             }
         }
         return null;
-    }
-}
-
-sealed class PingPlannerState
-{
-    private double _intervalMm;
-    private readonly double _maxIntervalMm;
-    private readonly double _multiplier;
-    private readonly double _firstPingBiasMm;
-    private double _lastPingExtrusionMm;
-
-    public PingPlannerState(double initialIntervalMm, double maxIntervalMm, double multiplier, double firstPingBiasMm)
-    {
-        _intervalMm = initialIntervalMm;
-        _maxIntervalMm = maxIntervalMm;
-        _multiplier = multiplier;
-        _firstPingBiasMm = firstPingBiasMm;
-        _lastPingExtrusionMm = 0;
-    }
-
-    public bool ShouldInsertPing(double totalEffectiveExtrusionMm)
-    {
-        return (totalEffectiveExtrusionMm - _lastPingExtrusionMm) > (_intervalMm - _firstPingBiasMm);
-    }
-
-    public void OnPingInserted(double atExtrusionMm)
-    {
-        _intervalMm = Math.Min(_maxIntervalMm, _intervalMm * _multiplier);
-        _lastPingExtrusionMm = atExtrusionMm;
     }
 }

@@ -4,8 +4,31 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 
+/// <summary>
+/// Implements the RAW_MMU two-pass pipeline: scan/model first, then rewrite.
+/// </summary>
+/// <remarks>
+/// Pass 1 uses <see cref="RawMmuScanner"/> to compute effective extrusion, splices, and ping locations.
+/// Pass 2 rewrites the G-code to remove slicer/MMU logistics and inject connected-mode Palette commands
+/// (Omega header, splice schedule, and ping blocks).
+///
+/// This processor is intentionally conservative: when it cannot reliably attribute extrusion to wipe tower
+/// vs model (e.g., missing <c>;TYPE</c> markers), it emits warnings and may skip certain breakdown metrics
+/// while still producing a valid connected-mode output.
+/// </remarks>
+/// <seealso cref="RawMmuScanner"/>
+/// <seealso cref="OmegaHeaderBuilder"/>
 static class RawMmuTwoPassProcessor
 {
+    /// <summary>
+    /// Runs the full RAW_MMU processing flow and returns the rewritten G-code lines.
+    /// </summary>
+    /// <param name="inputLines">Original input G-code lines.</param>
+    /// <param name="options">Processing options (ping planning, firmware behavior, etc.).</param>
+    /// <param name="displayName">A user-facing name used for job naming and diagnostics.</param>
+    /// <param name="sourcePath">Original source path used for provenance comments.</param>
+    /// <param name="timestampUtc">Timestamp used for provenance comments.</param>
+    /// <returns>Rewritten output G-code lines.</returns>
     public static IReadOnlyList<string> Process(string[] inputLines, Options options, string displayName, string sourcePath, DateTime timestampUtc)
     {
         var scan = RawMmuScanner.Scan(inputLines, options);

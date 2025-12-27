@@ -3,8 +3,24 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 
+/// <summary>
+/// Builds Palette "Omega" header lines for connected-mode output.
+/// </summary>
+/// <remarks>
+/// The header is emitted as G-code comment-like Omega commands (<c>O21</c>.. etc.) that encode job metadata,
+/// splice schedule (<c>O30</c>), ping schedule (<c>O31</c>), and algorithm mappings (<c>O32</c>).
+///
+/// This POC currently targets Palette 2 / 2S connected mode semantics.
+/// </remarks>
+/// <seealso cref="OmegaEncoding"/>
+/// <seealso cref="OmegaHeaderBuildInput"/>
 static class OmegaHeaderBuilder
 {
+    /// <summary>
+    /// Builds the connected-mode Palette 2 header block.
+    /// </summary>
+    /// <param name="input">Computed job and schedule data.</param>
+    /// <returns>A list of header lines to be inserted near the top of the output.</returns>
     public static IReadOnlyList<string> BuildPalette2Header(OmegaHeaderBuildInput input)
     {
         var header = new List<string>(capacity: 64 + input.Splices.Count + input.AlgorithmTable.Count);

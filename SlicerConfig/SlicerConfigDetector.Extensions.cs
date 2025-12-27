@@ -4,8 +4,27 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 
+/// <summary>
+/// Reads and interprets slicer configuration data embedded in G-code comments.
+/// </summary>
+/// <remarks>
+/// This file contains "extension" helpers for <see cref="SlicerConfigDetector"/> that parse additional
+/// PrusaSlicer/Slic3r footer fields.
+///
+/// The detector is designed to be resilient to slicer version differences and missing keys.
+/// </remarks>
+/// <seealso cref="SlicerConfigDetector"/>
 static partial class SlicerConfigDetector
 {
+    /// <summary>
+    /// Attempts to extract per-filament Spoolman spool IDs from PrusaSlicer-embedded metadata.
+    /// </summary>
+    /// <remarks>
+    /// Users commonly stash <c>spoolman_id</c> (or similar) in <c>filament_custom_variables</c> or
+    /// <c>filament_notes</c>. This method checks both and returns one entry per filament.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>A list of nullable IDs matching the filament slot count; empty when unavailable.</returns>
     public static IReadOnlyList<int?> TryReadSpoolmanSpoolIds(string[] lines)
     {
         // PrusaSlicer can carry per-filament user metadata in different keys, depending on version.
