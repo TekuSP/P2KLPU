@@ -38,4 +38,5 @@ sealed record Options(
     SpliceAlgorithm DefaultAlgorithm,
     IReadOnlyDictionary<TransitionKey, SpliceAlgorithm> AlgorithmOverrides,
     IReadOnlyDictionary<TransitionKey, SpliceAlgorithm> DiAlgorithmOverrides,
-    IReadOnlyDictionary<MaterialTransitionKey, SpliceAlgorithm> MaterialAlgorithmOverrides);
+    IReadOnlyDictionary<MaterialTransitionKey, SpliceAlgorithm> MaterialAlgorithmOverrides,
+    bool OctoPrintStripOmegaCommands);

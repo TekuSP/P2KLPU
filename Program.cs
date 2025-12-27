@@ -109,6 +109,7 @@ if (directives.Count > 0)
                 || k.Equals("PING_MACRO_BEFORE", StringComparison.OrdinalIgnoreCase)
                 || k.Equals("PING_MACRO_AFTER", StringComparison.OrdinalIgnoreCase)
                 || k.Equals("SPOOLMAN_SET_ACTIVE_SPOOL", StringComparison.OrdinalIgnoreCase)
+                || k.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase)
                 || k.StartsWith("ALGO", StringComparison.OrdinalIgnoreCase)
                 || k.StartsWith("MATERIAL_", StringComparison.OrdinalIgnoreCase))
             {
@@ -126,6 +127,28 @@ if (directives.Count > 0)
         if (ignoredCount > 0)
             Console.WriteLine($"  - (ignored {ignoredCount} other ;P2KLPU comment lines)");
         Console.WriteLine();
+    }
+}
+
+// OctoPrint Palette2 plugin compatibility:
+// The official/forked OctoPrint plugin intercepts Omega commands (O21/O1/O31/...) from the G-code stream.
+// If PrusaSlicer indicates a host target (SLIC3R_PP_HOST) and the slicer flavor is Marlin-ish, we assume
+// printing via OctoPrint. In that case, Omega commands must remain as real commands (not commented out).
+//
+// If the user enabled the strip-to-comments mode, disable it automatically in this scenario.
+// (The strip mode is still useful for non-OctoPrint Marlin workflows where unknown O-commands would break.)
+var hostPrinting = env is not null && !string.IsNullOrWhiteSpace(env.Host);
+var octoPrintLikely = options.Firmware is FirmwareFlavor.Marlin && hostPrinting;
+if (octoPrintLikely)
+{
+    if (options.Verbose)
+        Console.WriteLine($"Detected host printing (SLIC3R_PP_HOST={env!.Host}). Assuming OctoPrint; keeping Omega O-commands intact.");
+
+    if (options.OctoPrintStripOmegaCommands)
+    {
+        if (options.Verbose)
+            Console.WriteLine("Disabling OCTOPRINT_STRIP_O_COMMANDS for OctoPrint Palette2 plugin compatibility.");
+        options = options with { OctoPrintStripOmegaCommands = false };
     }
 }
 

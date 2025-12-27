@@ -43,6 +43,7 @@ sealed record DirectiveParseResult(
         var pingMacroBefore = options.PingMacroBefore;
         var pingMacroAfter = options.PingMacroAfter;
         var emitSetActiveSpool = options.EmitSetActiveSpool;
+        var octoPrintStripOmegaCommands = options.OctoPrintStripOmegaCommands;
         var algoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.AlgorithmOverrides);
         var diAlgoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.DiAlgorithmOverrides);
         var materialAlgoOverrides = new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(options.MaterialAlgorithmOverrides);
@@ -215,6 +216,13 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            if (key is "OCTOPRINT_STRIP_O_COMMANDS")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    octoPrintStripOmegaCommands = b;
+                continue;
+            }
+
             if (key is "ALGO")
             {
                 // Expected form in Value: "1-2=10,5,3" OR "1-2:10,5,3"
@@ -248,6 +256,7 @@ sealed record DirectiveParseResult(
             SyncPingMacroOverride = syncPingMacroOverride,
             PingMacroBefore = pingMacroBefore,
             PingMacroAfter = pingMacroAfter,
+            OctoPrintStripOmegaCommands = octoPrintStripOmegaCommands,
             AlgorithmOverrides = algoOverrides,
             DiAlgorithmOverrides = diAlgoOverrides,
             MaterialAlgorithmOverrides = materialAlgoOverrides

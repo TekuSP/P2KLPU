@@ -61,6 +61,33 @@ static class P2ppNetProcessor
             var rawCode = (rawCommentIdx >= 0 ? raw[..rawCommentIdx] : raw).Trim();
             var isCommentOnly = rawCode.Length == 0;
 
+            // OctoPrint + Marlin connected mode support:
+            // Some printers/firmwares will complain about unknown Omega commands (O1/O21/O30/O31/O32/etc).
+            // When explicitly enabled, we rewrite those lines into comment markers that an OctoPrint plugin
+            // can consume while keeping the file Marlin-safe.
+            if (options.OctoPrintStripOmegaCommands && rawCode.Length > 0 && LooksLikeOmegaCommand(rawCode))
+            {
+                // Preserve the original comment (if any) so debugging context is not lost.
+                var trailingComment = rawCommentIdx >= 0 ? raw[rawCommentIdx..].TrimEnd() : "";
+                var rewritten = ";P2KLPU_OCTO " + rawCode;
+                if (!string.IsNullOrWhiteSpace(trailingComment))
+                    rewritten += " " + trailingComment;
+
+                output.Add(rewritten);
+
+                // Keep ping after-macro behavior when O31 is rewritten to a comment.
+                if (inPingBlock
+                    && rawCode.StartsWith("O31", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(options.PingMacroAfter))
+                {
+                    output.Add(options.PingMacroAfter);
+                }
+
+                // Track last logical command for downstream pause rewrite logic.
+                lastNonCommentCommand = rawCode;
+                continue;
+            }
+
             if (raw.Contains("P2PP - INSERT PING CODE", StringComparison.OrdinalIgnoreCase))
             {
                 inPingBlock = true;
@@ -136,5 +163,14 @@ static class P2ppNetProcessor
         }
 
         return output;
+
+        static bool LooksLikeOmegaCommand(string code)
+        {
+            // Keep this intentionally conservative: only treat O<digit>... as Omega.
+            // This avoids rewriting other commands that start with 'O' in comments or unusual dialects.
+            if (code.Length < 2) return false;
+            if (code[0] != 'O' && code[0] != 'o') return false;
+            return char.IsDigit(code[1]);
+        }
     }
 }

@@ -212,5 +212,6 @@ public sealed class RawMmuScannerTests
         DefaultAlgorithm: new SpliceAlgorithm(0, 0, 0),
         AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
         DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
-        MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>());
+        MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
+        OctoPrintStripOmegaCommands: false);
 }

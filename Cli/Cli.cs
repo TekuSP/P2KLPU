@@ -88,7 +88,8 @@ static class Cli
                 DefaultAlgorithm: default,
                 AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
                 DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
-                MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>()));
+                MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
+                OctoPrintStripOmegaCommands: false));
         }
 
         if (positional.Count is < 1 or > 2)
@@ -130,7 +131,8 @@ static class Cli
             DefaultAlgorithm: defaultAlgo,
             AlgorithmOverrides: algoOverrides,
             DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
-            MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>());
+            MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
+            OctoPrintStripOmegaCommands: false);
 
         return new CliResult(true, null, options);
 
@@ -163,6 +165,7 @@ static class Cli
             DefaultAlgorithm: new SpliceAlgorithm(0, 0, 0),
             AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
             DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
-            MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>());
+            MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
+            OctoPrintStripOmegaCommands: false);
     }
 }
