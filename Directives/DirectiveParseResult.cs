@@ -30,6 +30,9 @@ sealed record DirectiveParseResult(
         var rawMmuMode = options.RawMmuMode;
         var printerProfile = options.PrinterProfileHex;
         var autoloadingOffset = options.AutoloadingOffsetMm;
+        var extraEndFilament = options.ExtraEndFilamentMm;
+        var minStartSpliceLength = options.MinStartSpliceLengthMm;
+        var minSpliceLength = options.MinSpliceLengthMm;
         var mmuToolchangeWindowLines = options.MmuToolchangeWindowLines;
         var mmuEOnlyStripThreshold = options.MmuEOnlyStripThresholdMm;
         var pingInitialInterval = options.PingInitialIntervalMm;
@@ -103,6 +106,33 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            if (key is "EXTRAENDFILAMENT")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm >= 0)
+                    extraEndFilament = mm;
+                continue;
+            }
+
+            if (key is "MINSTARTSPLICE")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
+                {
+                    // Palette 2/2S: clamp to a conservative minimum.
+                    minStartSpliceLength = Math.Max(100.0, mm);
+                }
+                continue;
+            }
+
+            if (key is "MINSPLICE")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
+                {
+                    // Palette 2/2S: clamp to a conservative minimum.
+                    minSpliceLength = Math.Max(70.0, mm);
+                }
+                continue;
+            }
+
             if (key is "MMU_TOOLCHANGE_WINDOW_LINES")
             {
                 if (int.TryParse(d.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n > 0)
@@ -145,7 +175,7 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
-            if (key is "SPLICE_OFFSET")
+            if (key is "SPLICE_OFFSET" or "SPLICEOFFSET")
             {
                 if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
                     spliceOffset = mm;
@@ -244,6 +274,9 @@ sealed record DirectiveParseResult(
             RawMmuMode = rawMmuMode,
             PrinterProfileHex = printerProfile,
             AutoloadingOffsetMm = autoloadingOffset,
+            ExtraEndFilamentMm = extraEndFilament,
+            MinStartSpliceLengthMm = minStartSpliceLength,
+            MinSpliceLengthMm = minSpliceLength,
             MmuToolchangeWindowLines = mmuToolchangeWindowLines,
             MmuEOnlyStripThresholdMm = mmuEOnlyStripThreshold,
             PingInitialIntervalMm = pingInitialInterval,

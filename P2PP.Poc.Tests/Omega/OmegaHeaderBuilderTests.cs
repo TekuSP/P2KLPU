@@ -11,6 +11,7 @@ public sealed class OmegaHeaderBuilderTests
             JobName: "my print",
             PrinterProfileHex: "50325050494e464f",
             AutoloadingOffsetMm: 0,
+            ExtraEndFilamentMm: 0,
             TotalEffectivePositiveExtrusionMm: 10,
             FilamentTypes: new[] { "PETG", "PLA" },
             FilamentColorsHex: new[] { "ff0000", "00ff00" },
@@ -28,5 +29,27 @@ public sealed class OmegaHeaderBuilderTests
         Assert.Contains("O30 D0 D40a00000", header); // 5.0f => 0x40a00000
         Assert.Contains("O32 D12 D0003 Dffff Dfffa", header);
         Assert.Contains("O1 Dmy_print D00000005", header); // last splice location 5mm
+    }
+
+    [Fact]
+    public void BuildPalette2Header_ExtraEndFilament_IncreasesO1Total()
+    {
+        var input = new OmegaHeaderBuildInput(
+            JobName: "job",
+            PrinterProfileHex: "50325050494e464f",
+            AutoloadingOffsetMm: 0,
+            ExtraEndFilamentMm: 150,
+            TotalEffectivePositiveExtrusionMm: 10,
+            FilamentTypes: Array.Empty<string>(),
+            FilamentColorsHex: Array.Empty<string>(),
+            ToolsUsed: Array.Empty<int>(),
+            Splices: Array.Empty<RawMmuSplice>(),
+            Pings: Array.Empty<RawMmuPing>(),
+            AlgorithmTable: Array.Empty<OmegaAlgorithmEntry>());
+
+        var header = OmegaHeaderBuilder.BuildPalette2Header(input);
+
+        // O1 total uses totalEffective + autoload + extraEndFilament.
+        Assert.Contains("O1 Djob D000000a0", header); // 10 + 150 = 160 (0xA0)
     }
 }

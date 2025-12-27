@@ -43,6 +43,7 @@ static class RawMmuTwoPassProcessor
             JobName: jobName,
             PrinterProfileHex: options.PrinterProfileHex,
             AutoloadingOffsetMm: options.AutoloadingOffsetMm,
+            ExtraEndFilamentMm: options.ExtraEndFilamentMm,
             TotalEffectivePositiveExtrusionMm: scan.TotalEffectivePositiveExtrusionMm,
             FilamentTypes: options.FilamentTypes,
             FilamentColorsHex: filamentColors,

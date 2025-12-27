@@ -12,6 +12,7 @@ sealed record OmegaHeaderBuildInput(
     string JobName,
     string PrinterProfileHex,
     double AutoloadingOffsetMm,
+    double ExtraEndFilamentMm,
     double TotalEffectivePositiveExtrusionMm,
     IReadOnlyList<string> FilamentTypes,
     IReadOnlyList<string> FilamentColorsHex,

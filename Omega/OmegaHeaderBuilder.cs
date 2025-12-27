@@ -65,6 +65,8 @@ static class OmegaHeaderBuilder
             ? input.Splices[^1].EffectiveLocationMm + input.AutoloadingOffsetMm
             : input.TotalEffectivePositiveExtrusionMm + input.AutoloadingOffsetMm;
 
+        totalForO1 += input.ExtraEndFilamentMm;
+
         header.Add($"O1 D{SanitizeJobName(input.JobName)} {OmegaEncoding.HexifyLong((int)(totalForO1 + 0.5))}");
 
         return header;

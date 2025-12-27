@@ -51,6 +51,15 @@ static class GcodeAnalyzer
                     Algorithm: algo));
             }
 
+            foreach (var s in splices)
+            {
+                var min = s.Index == 1 ? options.MinStartSpliceLengthMm : options.MinSpliceLengthMm;
+                if (min > 0 && s.LengthMm < min)
+                {
+                    warnings.Add($"Short splice detected: splice #{s.Index} length {s.LengthMm:0.00}mm < min {min:0.00}mm");
+                }
+            }
+
             // Still scan for O31 commands for compatibility diagnostics.
             for (var i = 0; i < lines.Length; i++)
             {
@@ -136,7 +145,7 @@ static class GcodeAnalyzer
                 sawTToolchange = true;
                 if (currentTool >= 0 && newTool != currentTool)
                 {
-                    // Equivalent to P2PP logic: schedule splice at (total_material_extruded + splice_offset)
+                    // Connected-mode scheduling: splice at (total_material_extruded + splice_offset)
                     var location = totalPositiveExtrusion + options.SpliceOffsetMm;
                     var length = location - previousSpliceLocation;
                     previousSpliceLocation = location;
