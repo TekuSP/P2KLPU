@@ -243,12 +243,39 @@ static void PrintHelp()
 
 static void WriteTextFile(string path, IEnumerable<string> lines)
 {
-    // Python writes bytes and manually adds \n; we do the same to keep file format stable.
-    using var fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
-    using var writer = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-    foreach (var line in lines)
+    // Atomic overwrite: write to a temp file in the same directory, then move over the target.
+    // This avoids leaving a truncated output file if the process crashes mid-write.
+    var fullPath = Path.GetFullPath(path);
+    var dir = Path.GetDirectoryName(fullPath);
+    if (string.IsNullOrWhiteSpace(dir))
+        dir = Directory.GetCurrentDirectory();
+
+    var tmpPath = Path.Combine(
+        dir,
+        Path.GetFileName(fullPath) + ".tmp." + Guid.NewGuid().ToString("N"));
+
+    try
     {
-        writer.Write(line);
-        writer.Write('\n');
+        // Python writes bytes and manually adds \n; we do the same to keep file format stable.
+        using (var fs = new FileStream(tmpPath, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+        using (var writer = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+        {
+            foreach (var line in lines)
+            {
+                writer.Write(line);
+                writer.Write('\n');
+            }
+        }
+
+        File.Move(tmpPath, fullPath, overwrite: true);
+    }
+    finally
+    {
+        // Best-effort cleanup if something went wrong before the move.
+        if (File.Exists(tmpPath))
+        {
+            try { File.Delete(tmpPath); }
+            catch { /* ignore */ }
+        }
     }
 }
