@@ -93,6 +93,11 @@ You *may* need additional PrusaSlicer configuration depending on the workflow:
 - This is *not* a full-featured tool yet: it does not implement a full purge/tower rewrite pipeline.
 - Today it’s most useful as a **Klipper compatibility pass** over connected-mode output (e.g., fixing `G4 S0` and letting you hook macros around ping blocks).
 
+Slicer feature edge cases (why Python cared more than this POC):
+- Features like **variable layer height** and **combine infill** mainly matter when a processor is doing geometry- or layer-structured rewrite (e.g., purge tower geometry / per-layer heuristics), because those slicer options change layer structure and how extrusion is distributed across layers.
+- This .NET POC’s RAW_MMU pipeline is primarily **stream/timeline based**: it plans splices and pings from toolchange events plus “effective positive extrusion” (E-distance excluding E-only toolchange logistics), and otherwise tries to keep print moves intact.
+- Practically: variable layer height / combined infill may change *where* a ping falls along the E timeline, but they are not expected to break processing correctness the way they can for tower-geometry rewrite.
+
 Klipper safety:
 - Palette 2/2S “Omega” uses `O..` commands (non-standard G-code). On Klipper, the built-in `[palette2]` module registers the `O0..O32` commands directly (see `klippy/extras/palette2.py`), so a file like `samples/output/example_processed.gcode` can work without defining `gcode_macro O21`, etc.
 
