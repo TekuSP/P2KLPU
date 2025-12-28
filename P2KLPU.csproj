@@ -16,9 +16,5 @@
     <!-- Keep excluding test sources from the main project build. -->
     <Compile Remove="P2KLPU.Tests\**\*.cs" />
     <None Remove="P2KLPU.Tests\**\*" />
-
-    <!-- Back-compat (in case an old folder name exists locally). -->
-    <Compile Remove="P2PP.Poc.Tests\**\*.cs" />
-    <None Remove="P2PP.Poc.Tests\**\*" />
   </ItemGroup>
 </Project>

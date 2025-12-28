@@ -303,7 +303,7 @@ internal static class Program
         Console.WriteLine("  - Configuration is passed via ;P2KLPU comment directives embedded by the slicer (not via CLI flags).");
         Console.WriteLine("  - PrusaSlicer env vars used when present: SLIC3R_PP_OUTPUT_NAME, SLIC3R_PP_HOST");
         Console.WriteLine("  - It currently focuses on analysis + Klipper-safe normalization (e.g., G4 handling)." );
-        Console.WriteLine("  - When run interactively, it pauses at the end by default (disabled automatically for PrusaSlicer runs).");
+        Console.WriteLine("  - When run interactively, it pauses at the end by default (auto-disabled when I/O is redirected). Use --no-pause to opt out.");
     }
 
     private static int Exit(int exitCode, Options options, PrusaSlicerEnv? env)
@@ -315,11 +315,8 @@ internal static class Program
     private static void MaybePauseAtEnd(Options options, PrusaSlicerEnv? env)
     {
         // Keep the console open by default for interactive runs (common when launching by double-click).
-        // However, never block when invoked as a slicer post-processing script.
+        // Do not block when stdin/stdout is redirected (typical for slicer/background/CI runs).
         if (options.NoPause)
-            return;
-
-        if (env is not null)
             return;
 
         if (!Environment.UserInteractive)
