@@ -166,6 +166,22 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            // Linear (fixed) ping spacing override.
+            // Matches the Python P2PP behavior:
+            //   - sets the base interval
+            //   - disables growth (multiplier=1)
+            //   - keeps PingMaxIntervalMm as an independent cap
+            //   - clamps to a conservative minimum
+            if (key is "LINEARPINGLENGTH" or "LINEAR_PING_LENGTH")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                {
+                    pingInitialInterval = Math.Max(100.0, mm);
+                    pingLengthMultiplier = 1.0;
+                }
+                continue;
+            }
+
             if (key is "PING_INTERVAL")
             {
                 if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)

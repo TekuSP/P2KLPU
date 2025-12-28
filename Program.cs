@@ -135,6 +135,8 @@ internal static class Program
                         || k.Equals("MINSPLICE", StringComparison.OrdinalIgnoreCase)
                         || k.Equals("MMU_TOOLCHANGE_WINDOW_LINES", StringComparison.OrdinalIgnoreCase)
                         || k.Equals("MMU_E_ONLY_STRIP_THRESHOLD", StringComparison.OrdinalIgnoreCase)
+                        || k.Equals("LINEARPINGLENGTH", StringComparison.OrdinalIgnoreCase)
+                        || k.Equals("LINEAR_PING_LENGTH", StringComparison.OrdinalIgnoreCase)
                         || k.Equals("PING_INTERVAL", StringComparison.OrdinalIgnoreCase)
                         || k.Equals("PING_MAX_INTERVAL", StringComparison.OrdinalIgnoreCase)
                         || k.Equals("PING_LENGTH_MULTIPLIER", StringComparison.OrdinalIgnoreCase)
