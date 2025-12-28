@@ -102,13 +102,13 @@ static class OmegaHeaderBuilder
                 ? input.FilamentColorsHex[di].Trim().ToLowerInvariant()
                 : "000000";
 
-            var name = TryGetNearestColorName(color) ?? ("C" + color);
+            var name = TryGetNearestCssColorName(color) ?? ("C" + color);
             name = SanitizeOmegaToken(name);
             var safeType = SanitizeOmegaToken(type);
 
-            // Add a visible separator between name and type. Spaces are not allowed because O25 uses spaces
-            // to separate per-input tokens.
-            var token = $"D{materialId}{color}{name}_{safeType}";
+            // Keep the Palette prompt compact/readable (historically like 'DodgerBluePETG').
+            // Note: spaces are not allowed because O25 uses spaces to separate per-input tokens.
+            var token = $"D{materialId}{color}{name}{safeType}";
             parts.Add(token);
         }
 
@@ -147,73 +147,72 @@ static class OmegaHeaderBuilder
         return true;
     }
 
-    private static string? TryGetNearestColorName(string sixHexLower)
+    private static string? TryGetNearestCssColorName(string sixHexLower)
     {
-        // Palette's display uses whatever we put into the 'name' field in O25.
-        // We keep this intentionally small and stable: pick a readable basic name.
         if (!IsSixHex(sixHexLower))
             return null;
 
         var (r, g, b) = ParseRgb(sixHexLower);
 
-        var max = Math.Max(r, Math.Max(g, b));
-        var min = Math.Min(r, Math.Min(g, b));
-        var delta = max - min;
-
-        // Grayscale-ish.
-        if (delta <= 18)
+        // Nearest named CSS color by Euclidean distance in RGB.
+        // This intentionally matches the style seen in many P2PP-generated O25 lines (e.g. DodgerBlue, DarkGray).
+        string? bestName = null;
+        var bestDist = long.MaxValue;
+        foreach (var c in CssNamedColors)
         {
-            if (max <= 20) return "Black";
-            if (min >= 235) return "White";
-            if (max >= 200) return "Silver";
-            return "Gray";
+            var dr = r - c.R;
+            var dg = g - c.G;
+            var db = b - c.B;
+            var dist = (long)dr * dr + (long)dg * dg + (long)db * db;
+            if (dist < bestDist)
+            {
+                bestDist = dist;
+                bestName = c.Name;
+                if (dist == 0)
+                    break;
+            }
         }
 
-        // Compute hue in degrees [0, 360).
-        var rf = r / 255.0;
-        var gf = g / 255.0;
-        var bf = b / 255.0;
-        var maxf = Math.Max(rf, Math.Max(gf, bf));
-        var minf = Math.Min(rf, Math.Min(gf, bf));
-        var df = maxf - minf;
-
-        double hue;
-        if (Math.Abs(df) < 1e-9)
-        {
-            hue = 0;
-        }
-        else if (Math.Abs(maxf - rf) < 1e-9)
-        {
-            hue = 60.0 * (((gf - bf) / df) % 6.0);
-        }
-        else if (Math.Abs(maxf - gf) < 1e-9)
-        {
-            hue = 60.0 * (((bf - rf) / df) + 2.0);
-        }
-        else
-        {
-            hue = 60.0 * (((rf - gf) / df) + 4.0);
-        }
-
-        if (hue < 0) hue += 360.0;
-
-        // A few special cases for common filament colors.
-        // Brown tends to be "dark orange".
-        var value = maxf;
-        var saturation = df / maxf;
-        if (hue >= 15 && hue < 45 && saturation > 0.5 && value < 0.65)
-            return "Brown";
-
-        if (hue < 15 || hue >= 345) return "Red";
-        if (hue < 45) return "Orange";
-        if (hue < 70) return "Yellow";
-        if (hue < 160) return "Green";
-        if (hue < 200) return "Cyan";
-        if (hue < 255) return "Blue";
-        if (hue < 290) return "Purple";
-        if (hue < 330) return "Magenta";
-        return "Pink";
+        return bestName;
     }
+
+    private readonly record struct CssColor(string Name, int R, int G, int B);
+
+    // Minimal-but-useful subset of CSS named colors. Add more as needed.
+    private static readonly CssColor[] CssNamedColors = new[]
+    {
+        new CssColor("Black", 0x00, 0x00, 0x00),
+        new CssColor("White", 0xFF, 0xFF, 0xFF),
+        new CssColor("Gray", 0x80, 0x80, 0x80),
+        new CssColor("DarkGray", 0xA9, 0xA9, 0xA9),
+        new CssColor("DimGray", 0x69, 0x69, 0x69),
+        new CssColor("LightGray", 0xD3, 0xD3, 0xD3),
+        new CssColor("Silver", 0xC0, 0xC0, 0xC0),
+        new CssColor("Red", 0xFF, 0x00, 0x00),
+        new CssColor("DarkRed", 0x8B, 0x00, 0x00),
+        new CssColor("Orange", 0xFF, 0xA5, 0x00),
+        new CssColor("DarkOrange", 0xFF, 0x8C, 0x00),
+        new CssColor("Yellow", 0xFF, 0xFF, 0x00),
+        new CssColor("Gold", 0xFF, 0xD7, 0x00),
+        new CssColor("Green", 0x00, 0x80, 0x00),
+        new CssColor("Lime", 0x00, 0xFF, 0x00),
+        new CssColor("Cyan", 0x00, 0xFF, 0xFF),
+        new CssColor("Aqua", 0x00, 0xFF, 0xFF),
+        new CssColor("Teal", 0x00, 0x80, 0x80),
+        new CssColor("Blue", 0x00, 0x00, 0xFF),
+        new CssColor("DodgerBlue", 0x1E, 0x90, 0xFF),
+        new CssColor("DeepSkyBlue", 0x00, 0xBF, 0xFF),
+        new CssColor("SkyBlue", 0x87, 0xCE, 0xEB),
+        new CssColor("Navy", 0x00, 0x00, 0x80),
+        new CssColor("Purple", 0x80, 0x00, 0x80),
+        new CssColor("Magenta", 0xFF, 0x00, 0xFF),
+        new CssColor("Fuchsia", 0xFF, 0x00, 0xFF),
+        new CssColor("Pink", 0xFF, 0xC0, 0xCB),
+        new CssColor("HotPink", 0xFF, 0x69, 0xB4),
+        new CssColor("Brown", 0xA5, 0x2A, 0x2A),
+        new CssColor("SaddleBrown", 0x8B, 0x45, 0x13),
+        new CssColor("Chocolate", 0xD2, 0x69, 0x1E),
+    };
 
     private static (int r, int g, int b) ParseRgb(string sixHex)
     {

@@ -36,6 +36,19 @@ static class RawMmuTwoPassProcessor
         var jobName = Path.GetFileNameWithoutExtension(displayName);
 
         var filamentColors = SlicerConfigDetector.TryReadFilamentColors(inputLines);
+        IReadOnlyList<string> colorsForInputs;
+        if (filamentColors.Count > 0
+            && filamentColors.Select(c => c?.Trim().ToUpperInvariant()).Where(c => !string.IsNullOrWhiteSpace(c)).Distinct().Count() > 1)
+        {
+            colorsForInputs = filamentColors;
+        }
+        else
+        {
+            // Many PrusaSlicer exports set filament_colour to the same value for every slot.
+            // extruder_colour usually carries the distinct per-tool colors the UI shows.
+            var extruderColors = SlicerConfigDetector.TryReadExtruderColors(inputLines);
+            colorsForInputs = extruderColors.Count > 0 ? extruderColors : filamentColors;
+        }
 
         var algorithmTable = BuildAlgorithmTable(scan, options);
 
@@ -46,7 +59,7 @@ static class RawMmuTwoPassProcessor
             ExtraEndFilamentMm: options.ExtraEndFilamentMm,
             TotalEffectivePositiveExtrusionMm: scan.TotalEffectivePositiveExtrusionMm,
             FilamentTypes: options.FilamentTypes,
-            FilamentColorsHex: filamentColors,
+            FilamentColorsHex: colorsForInputs,
             ToolsUsed: scan.ToolsUsed,
             Splices: scan.Splices,
             Pings: scan.Pings,

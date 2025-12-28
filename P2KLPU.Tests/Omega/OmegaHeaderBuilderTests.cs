@@ -73,8 +73,8 @@ public sealed class OmegaHeaderBuilderTests
         var o25 = Assert.Single(header, l => l.StartsWith("O25 ", StringComparison.Ordinal));
 
         // Color name is what Palette displays for loading prompts; should not be the raw Crrggbb token.
-        Assert.Contains("ff0000Red_PETG", o25);
-        Assert.Contains("00ff00Green_PLA", o25);
+        Assert.Contains("ff0000RedPETG", o25);
+        Assert.Contains("00ff00LimePLA", o25);
         Assert.DoesNotContain("Cff0000", o25);
     }
 }
