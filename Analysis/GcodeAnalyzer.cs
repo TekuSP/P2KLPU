@@ -27,6 +27,21 @@ static class GcodeAnalyzer
     {
         var warnings = new List<string>();
 
+        var filamentColors = SlicerConfigDetector.TryReadFilamentColors(lines);
+        IReadOnlyList<string> colorsForInputs;
+        if (filamentColors.Count > 0
+            && filamentColors.Select(c => c?.Trim().ToUpperInvariant()).Where(c => !string.IsNullOrWhiteSpace(c)).Distinct().Count() > 1)
+        {
+            colorsForInputs = filamentColors;
+        }
+        else
+        {
+            // Many PrusaSlicer exports set filament_colour to the same value for every slot.
+            // extruder_colour usually carries the distinct per-tool colors the UI shows.
+            var extruderColors = SlicerConfigDetector.TryReadExtruderColors(lines);
+            colorsForInputs = extruderColors.Count > 0 ? extruderColors : filamentColors;
+        }
+
         var pings = new List<PingEvent>();
 
         var sawTToolchange = false;
@@ -75,6 +90,13 @@ static class GcodeAnalyzer
                 }
             }
 
+            var inputUsage = BuildInputUsageSummary(
+                splices,
+                endLocationMm: scan.TotalEffectivePositiveExtrusionMm + options.SpliceOffsetMm,
+                endInput: scan.Splices.Count > 0 ? (scan.Splices[^1].ToTool + 1) : (scan.ToolsUsed.Count > 0 ? (scan.ToolsUsed[^1] + 1) : (int?)null),
+                colorsForInputs,
+                options);
+
             // In RAW_MMU mode, pings are *planned* (and inserted during rewrite) rather than typically
             // being present as O31 commands in the input.
             foreach (var p in scan.Pings)
@@ -119,6 +141,7 @@ static class GcodeAnalyzer
                 IgnoredToolchangeEOnlyPositiveExtrusionMm: scan.IgnoredToolchangeEOnlyPositiveExtrusionMm,
                 TowerBounds: scan.TowerBounds,
                 Splices: splices,
+                InputUsage: inputUsage,
                 Pings: pings,
                 Warnings: warnings);
         }
@@ -299,6 +322,13 @@ static class GcodeAnalyzer
             }
         }
 
+        var inputUsageNonRaw = BuildInputUsageSummary(
+            splicesNonRaw,
+            endLocationMm: totalPositiveExtrusion + options.SpliceOffsetMm,
+            endInput: currentTool >= 0 ? (currentTool + 1) : (int?)null,
+            colorsForInputs,
+            options);
+
         return new GcodeAnalysis(
             ExtrusionIsAbsolute: extrusionAbsolute,
             TotalPositiveExtrusionMm: totalPositiveExtrusion,
@@ -308,8 +338,84 @@ static class GcodeAnalyzer
             IgnoredToolchangeEOnlyPositiveExtrusionMm: null,
             TowerBounds: null,
             Splices: splicesNonRaw,
+            InputUsage: inputUsageNonRaw,
             Pings: pings,
             Warnings: warnings);
+    }
+
+    private static List<InputUsageSummary> BuildInputUsageSummary(
+        List<SpliceEvent> splices,
+        double endLocationMm,
+        int? endInput,
+        IReadOnlyList<string> filamentColors,
+        Options options)
+    {
+        if (splices.Count == 0)
+            return new List<InputUsageSummary>();
+
+        var usageByInput = new Dictionary<int, (double Used, int Segments, double? Min, double? Max)>();
+        foreach (var s in splices)
+        {
+            var key = s.FromInput;
+            if (!usageByInput.TryGetValue(key, out var acc))
+                acc = (0, 0, null, null);
+
+            acc.Used += s.LengthMm;
+            acc.Segments += 1;
+            acc.Min = acc.Min.HasValue ? Math.Min(acc.Min.Value, s.LengthMm) : s.LengthMm;
+            acc.Max = acc.Max.HasValue ? Math.Max(acc.Max.Value, s.LengthMm) : s.LengthMm;
+            usageByInput[key] = acc;
+        }
+
+        // Add tail segment from the last splice to the end of the file.
+        if (endInput.HasValue)
+        {
+            var lastLoc = splices[^1].LocationMm;
+            var tail = endLocationMm - lastLoc;
+            if (tail > 0)
+            {
+                var key = endInput.Value;
+                if (!usageByInput.TryGetValue(key, out var acc))
+                    acc = (0, 0, null, null);
+                acc.Used += tail;
+                usageByInput[key] = acc;
+            }
+        }
+
+        // Ensure inputs that only appear as ToInput also show up (with 0 segment count/min/max).
+        foreach (var to in splices.Select(s => s.ToInput).Distinct())
+        {
+            if (!usageByInput.ContainsKey(to))
+                usageByInput[to] = (0, 0, null, null);
+        }
+
+        var result = new List<InputUsageSummary>(usageByInput.Count);
+        foreach (var kv in usageByInput.OrderBy(k => k.Key))
+        {
+            var material = GetMaterial(options, kv.Key);
+            if (string.IsNullOrWhiteSpace(material))
+                material = "(unknown)";
+
+            string? colorHex = null;
+            var idx0 = kv.Key - 1;
+            if (idx0 >= 0 && idx0 < filamentColors.Count)
+            {
+                var c = filamentColors[idx0]?.Trim();
+                if (!string.IsNullOrWhiteSpace(c))
+                    colorHex = c;
+            }
+
+            result.Add(new InputUsageSummary(
+                Input: kv.Key,
+                Material: material,
+                ColorHex: colorHex,
+                UsedMm: kv.Value.Used,
+                SpliceSegmentCount: kv.Value.Segments,
+                MinSpliceSegmentMm: kv.Value.Min,
+                MaxSpliceSegmentMm: kv.Value.Max));
+        }
+
+        return result;
     }
 
     private static bool TryParseO31PingMm(string line, out double mm)

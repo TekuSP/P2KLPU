@@ -102,11 +102,10 @@ static class Cli
             return new CliResult(false, "Expected: <input.gcode> [output.gcode]", DefaultOptions());
 
         var inputPath = positional[0];
-        var outputPath = positional.Count == 2
-            ? positional[1]
-            : Path.Combine(
-                Path.GetDirectoryName(inputPath) ?? Directory.GetCurrentDirectory(),
-                Path.GetFileNameWithoutExtension(inputPath) + ".p2pp.gcode");
+        // When output is not explicitly provided, defer output-path decision to the main program.
+        // This allows us to follow the PrusaSlicer post-processing contract (typically overwrite the
+        // provided input temp file so PrusaSlicer can move/rename it to the final output location).
+        var outputPath = positional.Count == 2 ? positional[1] : "";
 
         var options = new Options(
             InputPath: inputPath,

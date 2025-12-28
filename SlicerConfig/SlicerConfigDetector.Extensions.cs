@@ -176,6 +176,48 @@ static partial class SlicerConfigDetector
         return Array.Empty<string>();
     }
 
+    /// <summary>
+    /// Attempts to read PrusaSlicer extruder colors from the embedded config footer.
+    /// </summary>
+    /// <remarks>
+    /// PrusaSlicer typically emits <c>extruder_colour</c> as a semicolon-separated list of hex colors.
+    /// This returns hex strings without the leading <c>#</c>.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>A list of hex color strings (one per tool) or an empty list when unavailable.</returns>
+    public static IReadOnlyList<string> TryReadExtruderColors(string[] lines)
+    {
+        // PrusaSlicer footer line typically:
+        //   ; extruder_colour = #FF8000;#DB5182;#3EC0FF
+        for (var i = lines.Length - 1; i >= 0; i--)
+        {
+            var l = lines[i].Trim();
+            if (!l.StartsWith(";"))
+                continue;
+
+            var s = l[1..].Trim();
+            if (!s.StartsWith("extruder_colour", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var eq = s.IndexOf('=');
+            if (eq < 0)
+                continue;
+
+            var rhs = s[(eq + 1)..].Trim();
+            var parts = rhs.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var result = new List<string>(parts.Length);
+            foreach (var p in parts)
+            {
+                var c = p.Trim();
+                if (c.StartsWith('#')) c = c[1..];
+                result.Add(c);
+            }
+            return result;
+        }
+
+        return Array.Empty<string>();
+    }
+
     private static IReadOnlyList<string> TryReadPrusaPerFilamentStringList(string[] lines, string key)
     {
         // Searches from bottom for config footer lines like:

@@ -20,10 +20,13 @@ sealed record PrusaSlicerEnv(string OutputName, string Host)
     {
         var output = Environment.GetEnvironmentVariable("SLIC3R_PP_OUTPUT_NAME");
         var host = Environment.GetEnvironmentVariable("SLIC3R_PP_HOST");
-        if (string.IsNullOrWhiteSpace(output) || string.IsNullOrWhiteSpace(host))
-        {
+        // PrusaSlicer sets SLIC3R_PP_OUTPUT_NAME for most post-processing runs.
+        // SLIC3R_PP_HOST is only set when printing to a host.
+        if (string.IsNullOrWhiteSpace(output) && string.IsNullOrWhiteSpace(host))
             return null;
-        }
-        return new PrusaSlicerEnv(output, host);
+
+        return new PrusaSlicerEnv(
+            OutputName: output ?? "",
+            Host: host ?? "");
     }
 }

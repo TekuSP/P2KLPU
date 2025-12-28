@@ -49,6 +49,29 @@ internal static class Program
         }
 
         var env = PrusaSlicerEnv.TryRead();
+
+        // Output-path behavior:
+        // - If the user explicitly provided an output path, respect it.
+        // - If invoked by PrusaSlicer (SLIC3R_PP_OUTPUT_NAME present), overwrite the provided input file.
+        //   PrusaSlicer will then move/rename that file to the final output location.
+        // - Otherwise, write a sibling file with a .p2pp.gcode suffix.
+        if (string.IsNullOrWhiteSpace(options.OutputPath))
+        {
+            if (env is not null)
+            {
+                options = options with { OutputPath = options.InputPath };
+            }
+            else
+            {
+                options = options with
+                {
+                    OutputPath = Path.Combine(
+                        Path.GetDirectoryName(options.InputPath) ?? Directory.GetCurrentDirectory(),
+                        Path.GetFileNameWithoutExtension(options.InputPath) + ".p2pp.gcode")
+                };
+            }
+        }
+
         var displayName = env?.OutputName ?? options.OutputPath;
 
         // Read all lines (matches Python behavior today; future: streaming).
@@ -302,6 +325,7 @@ internal static class Program
         Console.WriteLine("  - Klipper mode targets Klipper + Palette 2/2S connected mode.");
         Console.WriteLine("  - Configuration is passed via ;P2KLPU comment directives embedded by the slicer (not via CLI flags).");
         Console.WriteLine("  - PrusaSlicer env vars used when present: SLIC3R_PP_OUTPUT_NAME, SLIC3R_PP_HOST");
+        Console.WriteLine("  - When run from PrusaSlicer with only <input.gcode>, the input file is overwritten in-place so PrusaSlicer can move/rename it.");
         Console.WriteLine("  - It currently focuses on analysis + Klipper-safe normalization (e.g., G4 handling)." );
         Console.WriteLine("  - When run interactively, it pauses at the end by default (auto-disabled when I/O is redirected). Use --no-pause to opt out.");
     }

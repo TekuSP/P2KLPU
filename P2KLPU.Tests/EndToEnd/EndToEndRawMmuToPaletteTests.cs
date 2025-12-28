@@ -56,6 +56,41 @@ public sealed class EndToEndRawMmuToPaletteTests
         Assert.Contains(processed, l => l.TrimStart().StartsWith("O31", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void RawMmuMode_WithLinearPingLength_InsertsMultiplePings_WhenEnoughExtrusion()
+    {
+        var lines = new List<string>
+        {
+            ";P2KLPU LINEARPINGLENGTH=1000",
+            "M83",
+            "T0",
+        };
+
+        // 35 * 100mm = 3500mm effective extrusion => expect pings around 1000, 2000, 3000 (3 pings).
+        for (var i = 0; i < 35; i++)
+            lines.Add($"G1 X{i} Y0 E100.0");
+
+        var options = DefaultOptions() with
+        {
+            RawMmuMode = true,
+            MmuToolchangeWindowLines = 50,
+        };
+
+        // Apply in-file directives to options (matches Program.cs behavior).
+        var directives = P2klpuDirectiveScanner.ParseAll(lines.ToArray());
+        options = new DirectiveParseResult(true, -1, -1, directives).ApplyTo(options);
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines.ToArray(),
+            options,
+            displayName: "print.gcode",
+            sourcePath: "print.gcode",
+            timestampUtc: new DateTime(2025, 12, 28, 0, 0, 0, DateTimeKind.Utc));
+
+        var o31Count = processed.Count(l => l.TrimStart().StartsWith("O31", StringComparison.OrdinalIgnoreCase));
+        Assert.True(o31Count >= 3, $"Expected at least 3 O31 pings, got {o31Count}.");
+    }
+
     private static Options DefaultOptions() => new(
         InputPath: "in.gcode",
         OutputPath: "out.gcode",
