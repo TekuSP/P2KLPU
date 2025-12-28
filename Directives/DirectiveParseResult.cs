@@ -493,9 +493,22 @@ sealed record DirectiveParseResult(
         static bool TryParseDirectInput(string token, out int input)
         {
             input = 0;
-            if (!token.StartsWith("DI", StringComparison.OrdinalIgnoreCase))
+
+            var t = token.Trim();
+            if (t.Length < 3)
                 return false;
-            var num = token[2..];
+
+            // Accept both DI and IN prefixes:
+            //  DI1, DI2, ... (preferred)
+            //  IN1, IN2, ... (legacy/common shorthand)
+            string num;
+            if (t.StartsWith("DI", StringComparison.OrdinalIgnoreCase))
+                num = t[2..];
+            else if (t.StartsWith("IN", StringComparison.OrdinalIgnoreCase))
+                num = t[2..];
+            else
+                return false;
+
             return int.TryParse(num, NumberStyles.Integer, CultureInfo.InvariantCulture, out input) && input > 0;
         }
     }

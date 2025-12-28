@@ -116,6 +116,20 @@ internal static class Program
         if (directives.Count > 0)
         {
             options = new DirectiveParseResult(true, -1, -1, directives).ApplyTo(options);
+
+            // Warn about unknown directives (do not fail processing; unknown keys are ignored by design).
+            var unknownKeys = directives
+                .Select(d => d.Key.Trim())
+                .Where(k => !IsKnownDirectiveKey(k))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (unknownKeys.Count > 0)
+            {
+                var preview = string.Join(", ", unknownKeys.Take(6));
+                var suffix = unknownKeys.Count > 6 ? ", ..." : "";
+                Console.Error.WriteLine($"WARNING: Ignoring {unknownKeys.Count} unknown ;P2KLPU directive(s): {preview}{suffix}");
+            }
+
             if (options.Verbose)
             {
                 Console.WriteLine("=== P2KLPU Directives ===");
@@ -124,35 +138,7 @@ internal static class Program
                 foreach (var d in directives)
                 {
                     var k = d.Key.Trim();
-                    if (k.Equals("DEFAULT_ALGO", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("SPLICE_OFFSET", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("SPLICEOFFSET", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("RAW_MMU", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PRINTERPROFILE", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("AUTOLOADINGOFFSET", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("EXTRAENDFILAMENT", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("MINSTARTSPLICE", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("MINSPLICE", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("MMU_TOOLCHANGE_WINDOW_LINES", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("MMU_E_ONLY_STRIP_THRESHOLD", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("LINEARPINGLENGTH", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("LINEAR_PING_LENGTH", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PING_INTERVAL", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PING_MAX_INTERVAL", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PING_LENGTH_MULTIPLIER", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("SYNC_BEFORE_G4", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("G4_ZERO_TO_M400", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("REWRITE_M0_M1", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("DROP_M0_M1_AFTER_O1", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("SYNC_PING_MACRO_OVERRIDE", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PING_MACRO", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PING_MACRO_BEFORE", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("PING_MACRO_AFTER", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("SPOOLMAN_SET_ACTIVE_SPOOL", StringComparison.OrdinalIgnoreCase)
-                        || k.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase)
-                        || k.StartsWith("ALGO", StringComparison.OrdinalIgnoreCase)
-                        || k.StartsWith("MATERIAL_", StringComparison.OrdinalIgnoreCase)
-                        || k.StartsWith("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase))
+                    if (IsKnownDirectiveKey(k))
                     {
                         recognized.Add(d);
                         continue;
@@ -170,6 +156,44 @@ internal static class Program
                     Console.WriteLine($"  - (ignored {ignoredCount} other ;P2KLPU comment lines)");
                 Console.WriteLine();
             }
+        }
+
+        static bool IsKnownDirectiveKey(string key)
+        {
+            if (key.Length == 0) return false;
+
+            // Prefix directives.
+            if (key.StartsWith("ALGO", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("MATERIAL_", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase)) return true;
+
+            // Key/value directives.
+            return key.Equals("DEFAULT_ALGO", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SPLICE_OFFSET", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SPLICEOFFSET", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("RAW_MMU", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PRINTERPROFILE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("AUTOLOADINGOFFSET", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("EXTRAENDFILAMENT", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("MINSTARTSPLICE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("MINSPLICE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("MMU_TOOLCHANGE_WINDOW_LINES", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("MMU_E_ONLY_STRIP_THRESHOLD", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("LINEARPINGLENGTH", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("LINEAR_PING_LENGTH", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PING_INTERVAL", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PING_MAX_INTERVAL", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PING_LENGTH_MULTIPLIER", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SYNC_BEFORE_G4", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("G4_ZERO_TO_M400", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("REWRITE_M0_M1", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("DROP_M0_M1_AFTER_O1", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SYNC_PING_MACRO_OVERRIDE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PING_MACRO", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PING_MACRO_BEFORE", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("PING_MACRO_AFTER", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("SPOOLMAN_SET_ACTIVE_SPOOL", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase);
         }
 
         // OctoPrint Palette2 plugin compatibility:
