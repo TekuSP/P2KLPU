@@ -184,7 +184,7 @@ public sealed class PaletteCommandGenerationTests
 
     private static IReadOnlyList<string> ReadFixtureLines(string fixtureName)
     {
-        var path = GetRepoFilePath("dotnet-p2pp-poc", "P2PP.Poc.Tests", "Fixtures", fixtureName);
+        var path = GetRepoFilePath("dotnet-p2pp-poc", "P2KLPU.Tests", "Fixtures", fixtureName);
         return File.ReadAllLines(path)
             .Select(l => l.Trim())
             .Where(l => l.Length != 0)

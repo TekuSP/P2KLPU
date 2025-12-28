@@ -1,3 +1,3 @@
 using System.Runtime.CompilerServices;
 
-[assembly: InternalsVisibleTo("P2PP.Poc.Tests")]
+[assembly: InternalsVisibleTo("P2KLPU.Tests")]

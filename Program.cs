@@ -7,7 +7,7 @@ using System.Text;
 
 internal static class Program
 {
-    // P2PP .NET POC (Klipper-first)
+    // P2KLPU (Palette To Klipper Postprocessing Unit) .NET POC (Klipper-first)
     // Goals:
     //  1) Match PrusaSlicer post-processing contract (input.gcode [output.gcode]).
     //  2) Keep configuration in-G-code via ';P2KLPU ...' directives.
@@ -263,9 +263,9 @@ internal static class Program
 
     private static void PrintHelp()
     {
-        Console.WriteLine("P2PP.NET POC (Klipper-first)\n");
+        Console.WriteLine("P2KLPU (Palette To Klipper Postprocessing Unit)\n");
         Console.WriteLine("Usage:");
-        Console.WriteLine("  P2PP.Poc <input.gcode> [output.gcode] [options]\n");
+        Console.WriteLine("  P2KLPU <input.gcode> [output.gcode] [options]\n");
         Console.WriteLine("Core options:");
         Console.WriteLine("  --dry-run                 Analyze and print splice plan only; write nothing");
         Console.WriteLine("  --verbose                 Print extra detection details (extrusion mode, etc.)");

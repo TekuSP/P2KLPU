@@ -6,7 +6,6 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <LangVersion>preview</LangVersion>
 
-    <!-- Kept for backward compatibility; emits the P2KLPU.Tests assembly. -->
     <AssemblyName>P2KLPU.Tests</AssemblyName>
     <RootNamespace>P2KLPU.Tests</RootNamespace>
   </PropertyGroup>

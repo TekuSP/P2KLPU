@@ -7,12 +7,17 @@
     <LangVersion>preview</LangVersion>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
 
-    <!-- Kept for backward compatibility; emits the P2KLPU binary. -->
+    <!-- Rename binary/assembly to match the tool name -->
     <AssemblyName>P2KLPU</AssemblyName>
     <RootNamespace>P2KLPU</RootNamespace>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Keep excluding test sources from the main project build. -->
+    <Compile Remove="P2KLPU.Tests\**\*.cs" />
+    <None Remove="P2KLPU.Tests\**\*" />
+
+    <!-- Back-compat (in case an old folder name exists locally). -->
     <Compile Remove="P2PP.Poc.Tests\**\*.cs" />
     <None Remove="P2PP.Poc.Tests\**\*" />
   </ItemGroup>

@@ -57,7 +57,7 @@ RAW_MMU hardening / diagnostics:
 
 - `dotnet build`
 - Dry-run analysis:
-	- `dotnet run --project .\\*.csproj --framework net10.0 -- input.gcode --dry-run`
+	- `dotnet run --project .\\P2KLPU.csproj --framework net10.0 -- input.gcode --dry-run`
 
 ## PrusaSlicer setup (post-processing)
 
@@ -69,7 +69,7 @@ So in PrusaSlicer you typically only enter the executable path; PrusaSlicer supp
 
 Windows examples:
 - If you built the project and want to run via the .NET host:
-	- `dotnet "C:\\path\\to\\tool\\bin\\Release\\net10.0\\*.dll"`
+	- `dotnet "C:\\path\\to\\tool\\bin\\Release\\net10.0\\P2KLPU.dll"`
 - If you published a self-contained executable:
 	- `"C:\\path\\to\\your-tool.exe"`
 

@@ -49,7 +49,7 @@ sealed record GcodeAnalysis(
         const string FgMagenta = "\u001b[35m";
 
         var sb = new StringBuilder();
-        sb.AppendLine(C("=== P2PP.NET Analysis ===", Bold + FgCyan, useColor));
+        sb.AppendLine(C("=== P2KLPU Analysis ===", Bold + FgCyan, useColor));
         sb.AppendLine($"Display name: {Path.GetFileName(displayName)}");
         sb.AppendLine($"Extrusion mode: {(ExtrusionIsAbsolute ? "Absolute (M82)" : "Relative (M83)")}");
         sb.AppendLine($"Total positive extrusion: {TotalPositiveExtrusionMm:0.###} mm");
