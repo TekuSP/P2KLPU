@@ -100,5 +100,6 @@ public sealed class AnalyzerWarningsTests
         AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
         DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
         MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
-        OctoPrintStripOmegaCommands: false);
+        OctoPrintStripOmegaCommands: false,
+        NoPause: false);
 }

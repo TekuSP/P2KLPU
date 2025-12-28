@@ -40,6 +40,7 @@ using System.Collections.Generic;
 /// <param name="DiAlgorithmOverrides">Algorithm overrides keyed by DI-to-DI transitions (legacy/alias mapping).</param>
 /// <param name="MaterialAlgorithmOverrides">Algorithm overrides keyed by material-to-material transitions.</param>
 /// <param name="OctoPrintStripOmegaCommands">Whether to rewrite Omega <c>O*</c> lines into plugin-friendly comments (Marlin safety mode).</param>
+/// <param name="NoPause">Whether to exit immediately (do not wait for a key press) at the end of interactive runs.</param>
 /// <seealso cref="DirectiveParseResult"/>
 /// <seealso cref="RawMmuScanner"/>
 sealed record Options(
@@ -75,4 +76,5 @@ sealed record Options(
     IReadOnlyDictionary<TransitionKey, SpliceAlgorithm> AlgorithmOverrides,
     IReadOnlyDictionary<TransitionKey, SpliceAlgorithm> DiAlgorithmOverrides,
     IReadOnlyDictionary<MaterialTransitionKey, SpliceAlgorithm> MaterialAlgorithmOverrides,
-    bool OctoPrintStripOmegaCommands);
+    bool OctoPrintStripOmegaCommands,
+    bool NoPause);

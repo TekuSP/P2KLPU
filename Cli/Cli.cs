@@ -28,6 +28,7 @@ static class Cli
         var dryRun = false;
         var verbose = false;
         var showHelp = false;
+        var noPause = false;
 
         // Defaults assume Klipper; actual behavior is auto-detected from the file.
         var firmware = FirmwareFlavor.Klipper;
@@ -50,6 +51,7 @@ static class Cli
 
             if (a.Equals("--dry-run", StringComparison.OrdinalIgnoreCase)) { dryRun = true; continue; }
             if (a.Equals("--verbose", StringComparison.OrdinalIgnoreCase)) { verbose = true; continue; }
+            if (a.Equals("--no-pause", StringComparison.OrdinalIgnoreCase)) { noPause = true; continue; }
 
             if (a.StartsWith('-'))
                 return new CliResult(false, $"Unknown option: {a}", DefaultOptions());
@@ -92,7 +94,8 @@ static class Cli
                 AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
                 DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
                 MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
-                OctoPrintStripOmegaCommands: false));
+                OctoPrintStripOmegaCommands: false,
+                NoPause: noPause));
         }
 
         if (positional.Count is < 1 or > 2)
@@ -138,7 +141,8 @@ static class Cli
             AlgorithmOverrides: algoOverrides,
             DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
             MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
-            OctoPrintStripOmegaCommands: false);
+            OctoPrintStripOmegaCommands: false,
+            NoPause: noPause);
 
         return new CliResult(true, null, options);
 
@@ -175,6 +179,7 @@ static class Cli
             AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
             DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
             MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
-            OctoPrintStripOmegaCommands: false);
+            OctoPrintStripOmegaCommands: false,
+            NoPause: false);
     }
 }

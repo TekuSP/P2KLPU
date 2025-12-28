@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 /// <summary>
@@ -81,12 +83,46 @@ sealed record GcodeAnalysis(
 
         if (Splices.Count > 0)
         {
+            const string indexHeader = "#";
+            const string fromToHeader = "From->To";
+            const string locationHeader = "Location(mm)";
+            const string lengthHeader = "Length(mm)";
+
+            var indexWidth = Math.Max(indexHeader.Length, Splices.Max(s => s.Index).ToString(CultureInfo.InvariantCulture).Length);
+            var inputWidth = Math.Max(1, Splices.Max(s => Math.Max(s.FromInput, s.ToInput)).ToString(CultureInfo.InvariantCulture).Length);
+            var fromToWidth = Math.Max(fromToHeader.Length, (inputWidth * 2) + 2); // "<from>-><to>"
+            var maxLocationText = Splices
+                .Select(s => s.LocationMm.ToString("0.###", CultureInfo.InvariantCulture))
+                .Max(s => s.Length);
+            var maxLengthText = Splices
+                .Select(s => s.LengthMm.ToString("0.###", CultureInfo.InvariantCulture))
+                .Max(s => s.Length);
+
+            // Add a little breathing room so columns don't visually collide.
+            var locationWidth = Math.Max(locationHeader.Length, maxLocationText) + 1;
+            var lengthWidth = Math.Max(lengthHeader.Length, maxLengthText) + 1;
+
             sb.AppendLine("Splice plan (1-based inputs):");
-            sb.AppendLine("#   From->To   Location(mm)   Length(mm)   Algo(h,c,k)");
+            sb.AppendLine(
+                indexHeader.PadLeft(indexWidth)
+                + "  "
+                + fromToHeader.PadRight(fromToWidth)
+                + "  "
+                + locationHeader.PadLeft(locationWidth)
+                + "  "
+                + lengthHeader.PadLeft(lengthWidth)
+                + "   Algo(h,c,k)");
             foreach (var s in Splices)
             {
-                sb.AppendLine(
-                    $"{s.Index,2}  {s.FromInput,2}->{s.ToInput,-2}  {s.LocationMm,11:0.###}  {s.LengthMm,10:0.###}   {s.Algorithm}");
+                var idx = s.Index.ToString(CultureInfo.InvariantCulture).PadLeft(indexWidth);
+                var fromTo = s.FromInput.ToString(CultureInfo.InvariantCulture).PadLeft(inputWidth)
+                    + "->"
+                    + s.ToInput.ToString(CultureInfo.InvariantCulture).PadRight(inputWidth);
+                var fromToCol = fromTo.PadRight(fromToWidth);
+                var location = s.LocationMm.ToString("0.###", CultureInfo.InvariantCulture).PadLeft(locationWidth);
+                var length = s.LengthMm.ToString("0.###", CultureInfo.InvariantCulture).PadLeft(lengthWidth);
+
+                sb.AppendLine($"{idx}  {fromToCol}  {location}  {length}   {s.Algorithm}");
             }
             sb.AppendLine();
         }

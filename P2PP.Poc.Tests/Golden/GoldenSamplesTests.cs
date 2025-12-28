@@ -82,7 +82,8 @@ public sealed class PaletteCommandGenerationTests
             AlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
             DiAlgorithmOverrides: new Dictionary<TransitionKey, SpliceAlgorithm>(),
             MaterialAlgorithmOverrides: new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(),
-            OctoPrintStripOmegaCommands: false);
+            OctoPrintStripOmegaCommands: false,
+            NoPause: false);
 
         var directives = P2klpuDirectiveScanner.ParseAll(lines);
         if (directives.Count > 0)
