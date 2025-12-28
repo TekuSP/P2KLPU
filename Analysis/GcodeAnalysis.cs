@@ -34,8 +34,22 @@ sealed record GcodeAnalysis(
     /// <returns>A formatted report string.</returns>
     public string ToConsoleString(string displayName, bool verbose)
     {
+        var useColor = Environment.UserInteractive
+            && !Console.IsOutputRedirected
+            && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NO_COLOR"));
+
+        static string C(string text, string ansi, bool enabled)
+            => enabled ? ansi + text + "\u001b[0m" : text;
+
+        const string Bold = "\u001b[1m";
+        const string Dim = "\u001b[2m";
+        const string FgCyan = "\u001b[36m";
+        const string FgYellow = "\u001b[33m";
+        const string FgGreen = "\u001b[32m";
+        const string FgMagenta = "\u001b[35m";
+
         var sb = new StringBuilder();
-        sb.AppendLine("=== P2PP.NET Analysis ===");
+        sb.AppendLine(C("=== P2PP.NET Analysis ===", Bold + FgCyan, useColor));
         sb.AppendLine($"Display name: {Path.GetFileName(displayName)}");
         sb.AppendLine($"Extrusion mode: {(ExtrusionIsAbsolute ? "Absolute (M82)" : "Relative (M83)")}");
         sb.AppendLine($"Total positive extrusion: {TotalPositiveExtrusionMm:0.###} mm");
@@ -66,7 +80,17 @@ sealed record GcodeAnalysis(
             for (var i = 0; i < show; i++)
             {
                 var p = Pings[i];
-                sb.AppendLine($"  Ping {i + 1,2}: {p.RawCommand}  =>  {p.PositionMm:0.###} mm");
+                var n = (i + 1).ToString(CultureInfo.InvariantCulture).PadLeft(2);
+                var raw = p.RawCommand;
+                var pos = p.PositionMm.ToString("0.###", CultureInfo.InvariantCulture);
+                sb.AppendLine(
+                    "  "
+                    + C("Ping ", Dim, useColor)
+                    + C(n, Dim, useColor)
+                    + C(": ", Dim, useColor)
+                    + C(raw, FgMagenta, useColor)
+                    + C("  =>  ", Dim, useColor)
+                    + C(pos + " mm", FgGreen, useColor));
             }
             if (!verbose && Pings.Count > 1)
                 sb.AppendLine("  (Run with --verbose to show more pings)");
@@ -75,9 +99,9 @@ sealed record GcodeAnalysis(
 
         if (Warnings.Count > 0)
         {
-            sb.AppendLine("Warnings:");
+            sb.AppendLine(C("Warnings:", Bold + FgYellow, useColor));
             foreach (var w in Warnings)
-                sb.AppendLine($"  - {w}");
+                sb.AppendLine(C($"  - {w}", FgYellow, useColor));
             sb.AppendLine();
         }
 
@@ -103,7 +127,7 @@ sealed record GcodeAnalysis(
             var lengthWidth = Math.Max(lengthHeader.Length, maxLengthText) + 1;
 
             sb.AppendLine("Splice plan (1-based inputs):");
-            sb.AppendLine(
+            sb.AppendLine(C(
                 indexHeader.PadLeft(indexWidth)
                 + "  "
                 + fromToHeader.PadRight(fromToWidth)
@@ -111,7 +135,9 @@ sealed record GcodeAnalysis(
                 + locationHeader.PadLeft(locationWidth)
                 + "  "
                 + lengthHeader.PadLeft(lengthWidth)
-                + "   Algo(h,c,k)");
+                + "   Algo(h,c,k)",
+                Bold + FgCyan,
+                useColor));
             foreach (var s in Splices)
             {
                 var idx = s.Index.ToString(CultureInfo.InvariantCulture).PadLeft(indexWidth);
@@ -122,7 +148,16 @@ sealed record GcodeAnalysis(
                 var location = s.LocationMm.ToString("0.###", CultureInfo.InvariantCulture).PadLeft(locationWidth);
                 var length = s.LengthMm.ToString("0.###", CultureInfo.InvariantCulture).PadLeft(lengthWidth);
 
-                sb.AppendLine($"{idx}  {fromToCol}  {location}  {length}   {s.Algorithm}");
+                sb.AppendLine(
+                    C(idx, Dim, useColor)
+                    + "  "
+                    + C(fromToCol, FgMagenta, useColor)
+                    + "  "
+                    + C(location, FgGreen, useColor)
+                    + "  "
+                    + C(length, FgGreen, useColor)
+                    + "   "
+                    + C(s.Algorithm.ToString(), Bold, useColor));
             }
             sb.AppendLine();
         }
