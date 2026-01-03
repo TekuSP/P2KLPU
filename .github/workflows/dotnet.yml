@@ -12,18 +12,77 @@ on:
 
 jobs:
   build:
-
-    runs-on: windows-latest
-
+    name: Build (${{ matrix.os }} ${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Windows
+            runsOn: windows-latest
+            platform: win-x64
+            needsX86DotnetRoot: false
+          - os: Windows
+            runsOn: windows-latest
+            platform: win-x86
+            needsX86DotnetRoot: true
+          - os: Windows
+            runsOn: windows-11-arm
+            platform: win-arm64
+            needsX86DotnetRoot: false
+          - os: Linux
+            runsOn: ubuntu-latest
+            platform: linux-x64
+            needsX86DotnetRoot: false
+          - os: Linux
+            runsOn: ubuntu-24.04-arm
+            platform: linux-arm64
+            needsX86DotnetRoot: false
+          - os: MacOSX
+            runsOn: macos-15-intel
+            platform: osx-x64
+            needsX86DotnetRoot: false
+          - os: MacOSX
+            runsOn: macos-latest
+            platform: osx-arm64
+            needsX86DotnetRoot: false
+    runs-on: ${{ matrix.runsOn }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 10.0.x
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Build
-      run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
+      - uses: actions/checkout@v4
+      - name: Setup .NET x86 (Windows x86 workaround)
+        if: ${{ matrix.needsX86DotnetRoot }}
+        uses: actions/setup-dotnet@v4
+        env:
+          PROCESSOR_ARCHITECTURE: x86
+          DOTNET_INSTALL_DIR: C:\Program Files (x86)\dotnet
+        with:
+          dotnet-version: 10.0.x
+      - name: Set DOTNET_ROOT(x86)
+        if: ${{ matrix.needsX86DotnetRoot }}
+        shell: pwsh
+        run: |
+          "DOTNET_ROOT(x86)=${env:DOTNET_ROOT}" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore dependencies
+        run: dotnet restore -p:MyRuntimeIdentifier=${{ matrix.platform }}
+      - name: Build
+        run: dotnet build --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
+      - name: Test
+        run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
+      - name: Publish
+        run: dotnet publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.platform }}
+      - name: Upload dotnet test results
+        uses: actions/upload-artifact@v6
+        if: ${{ always() }}
+        with:
+          name: dotnet-results-${{ matrix.platform }}
+          path: TestResults-${{ matrix.platform }}
+      - name: Upload build
+        uses: actions/upload-artifact@v6
+        if: ${{ always() }}
+        continue-on-error: true
+        with:
+          name: P2KLPU - ${{ matrix.os }} - ${{ matrix.platform }}
+          path: ./Publish/${{ matrix.platform }}
