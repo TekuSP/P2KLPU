@@ -10,6 +10,10 @@ on:
     branches: [ "master" ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   build:
     name: Build (${{ matrix.os }} ${{ matrix.platform }})
@@ -75,6 +79,19 @@ jobs:
         run: dotnet build -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable
       - name: Test
         run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
+
+      - name: Test report (TRX)
+        uses: dorny/test-reporter@v2
+        if: ${{ !cancelled() }}
+        with:
+          name: Tests - ${{ matrix.os }} - ${{ matrix.platform }}
+          path: TestResults-${{ matrix.os }}-${{ matrix.platform }}/**/*.trx
+          reporter: dotnet-trx
+          use-actions-summary: 'true'
+          list-suites: all
+          list-tests: failed
+          max-annotations: '10'
+
       - name: Publish
         run: dotnet publish ./P2KLPU.csproj -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
 
