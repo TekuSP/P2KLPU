@@ -3,6 +3,10 @@
 
 name: .NET
 
+env:
+  # Simple SemVer-ish versioning: MAJOR.MINOR is pinned here, BUILD increments per workflow run.
+  VERSION_PREFIX: '0.1'
+
 on:
   push:
     branches: [ "master" ]
@@ -74,11 +78,11 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Restore dependencies
-        run: dotnet restore ./P2KLPU.sln -r ${{ matrix.platform }} -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:PublishSingleFile=true -p:SelfContained=false -p:DebugSymbols=true -p:DebugType=portable
+        run: dotnet restore ./P2KLPU.sln -r ${{ matrix.platform }} -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:Version=${{ env.VERSION_PREFIX }}.${{ github.run_number }} -p:InformationalVersion=${{ env.VERSION_PREFIX }}.${{ github.run_number }}+${{ github.sha }} -p:PublishSingleFile=true -p:SelfContained=false -p:DebugSymbols=true -p:DebugType=portable
       - name: Build
-        run: dotnet build -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable
+        run: dotnet build -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:Version=${{ env.VERSION_PREFIX }}.${{ github.run_number }} -p:InformationalVersion=${{ env.VERSION_PREFIX }}.${{ github.run_number }}+${{ github.sha }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable
       - name: Test
-        run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
+        run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:Version=${{ env.VERSION_PREFIX }}.${{ github.run_number }} -p:InformationalVersion=${{ env.VERSION_PREFIX }}.${{ github.run_number }}+${{ github.sha }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
 
       - name: Test report (TRX)
         uses: dorny/test-reporter@v2
@@ -93,7 +97,7 @@ jobs:
           max-annotations: '10'
 
       - name: Publish
-        run: dotnet publish ./P2KLPU.csproj -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
+        run: dotnet publish ./P2KLPU.csproj -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:Version=${{ env.VERSION_PREFIX }}.${{ github.run_number }} -p:InformationalVersion=${{ env.VERSION_PREFIX }}.${{ github.run_number }}+${{ github.sha }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
 
       - name: Collect symbols + strip from publish
         shell: pwsh
@@ -122,18 +126,18 @@ jobs:
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
         with:
-          name: Symbols - ${{ matrix.os }} - ${{ matrix.platform }}
+          name: Symbols - v${{ env.VERSION_PREFIX }}.${{ github.run_number }} - ${{ matrix.os }} - ${{ matrix.platform }}
           path: ./Symbols/${{ matrix.os }}/${{ matrix.platform }}
       - name: Upload dotnet test results
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
         with:
-          name: Unit Test Results - ${{ matrix.os }} - ${{ matrix.platform }}
+          name: Unit Test Results - v${{ env.VERSION_PREFIX }}.${{ github.run_number }} - ${{ matrix.os }} - ${{ matrix.platform }}
           path: TestResults-${{ matrix.os }}-${{ matrix.platform }}
       - name: Upload build
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
         continue-on-error: true
         with:
-          name: P2KLPU - ${{ matrix.os }} - ${{ matrix.platform }}
+          name: P2KLPU - v${{ env.VERSION_PREFIX }}.${{ github.run_number }} - ${{ matrix.os }} - ${{ matrix.platform }}
           path: ./Publish/${{ matrix.os }}/${{ matrix.platform }}
