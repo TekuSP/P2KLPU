@@ -47,7 +47,7 @@ jobs:
             needsX86DotnetRoot: false
     runs-on: ${{ matrix.runsOn }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Setup .NET x86 (Windows x86 workaround)
         if: ${{ matrix.needsX86DotnetRoot }}
         uses: actions/setup-dotnet@v5
