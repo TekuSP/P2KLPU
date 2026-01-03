@@ -20,24 +20,31 @@ jobs:
           - os: Windows
             runsOn: windows-latest
             platform: win-x64
+            dotnetArchitecture: x64
           - os: Windows
             runsOn: windows-latest
             platform: win-x86
+            dotnetArchitecture: x86
           - os: Windows
             runsOn: windows-11-arm
             platform: win-arm64
+            dotnetArchitecture: arm64
           - os: Linux
             runsOn: ubuntu-latest
             platform: linux-x64
+            dotnetArchitecture: x64
           - os: Linux
             runsOn: ubuntu-24.04-arm
             platform: linux-arm64
+            dotnetArchitecture: arm64
           - os: MacOSX
             runsOn: macos-15-intel
             platform: osx-x64
+            dotnetArchitecture: x64
           - os: MacOSX
             runsOn: macos-latest
             platform: osx-arm64
+            dotnetArchitecture: arm64
     runs-on: ${{ matrix.runsOn }}
     steps:
       - uses: actions/checkout@v4
@@ -45,16 +52,15 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+          architecture: ${{ matrix.dotnetArchitecture }}
       - name: Restore dependencies
-        run: dotnet restore
-      - name: Build
-        run: dotnet build --no-restore --configuration Release
-      - name: Test
-        run: dotnet test --no-build --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
-      - name: Restore dependencies (publish RID)
         run: dotnet restore -p:MyRuntimeIdentifier=${{ matrix.platform }}
+      - name: Build
+        run: dotnet build --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
+      - name: Test
+        run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
       - name: Publish
-        run: dotnet publish --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish
+        run: dotnet publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.platform }}
       - name: Upload dotnet test results
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
@@ -67,4 +73,4 @@ jobs:
         continue-on-error: true
         with:
           name: P2KLPU - ${{ matrix.os }} - ${{ matrix.platform }}
-          path: ./Publish
+          path: ./Publish/${{ matrix.platform }}
