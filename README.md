@@ -435,6 +435,8 @@ Press any key to exit...
 
 ### Last final warning, this code was half written by GPT5.2, I have reviewed and written large part of code myself, but the project was too huge to analyze over weekened alone.... I will work on improvements myself.
 
+#### Foot note, for development, clone the repo, have .NET 10 SDK, and use Visual Studio Code or Visual Studio 2026 Community, no special anything required, its console app
+
 This folder contains a .NET C# proof-of-concept for a future rewrite.
 
 Current focus:
