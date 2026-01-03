@@ -62,43 +62,16 @@ jobs:
         run: |
           "DOTNET_ROOT(x86)=${env:DOTNET_ROOT}" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Setup .NET
-        if: ${{ !matrix.needsX86DotnetRoot }}
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
-
-      - name: Restore dependencies (x86)
-        if: ${{ matrix.needsX86DotnetRoot }}
-        shell: pwsh
-        run: |
-          & "${env:DOTNET_ROOT(x86)}\dotnet.exe" restore -p:MyRuntimeIdentifier=${{ matrix.platform }}
-      - name: Build (x86)
-        if: ${{ matrix.needsX86DotnetRoot }}
-        shell: pwsh
-        run: |
-          & "${env:DOTNET_ROOT(x86)}\dotnet.exe" build --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
-      - name: Test (x86)
-        if: ${{ matrix.needsX86DotnetRoot }}
-        shell: pwsh
-        run: |
-          & "${env:DOTNET_ROOT(x86)}\dotnet.exe" test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
-      - name: Publish (x86)
-        if: ${{ matrix.needsX86DotnetRoot }}
-        shell: pwsh
-        run: |
-          & "${env:DOTNET_ROOT(x86)}\dotnet.exe" publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.platform }}
-
       - name: Restore dependencies
-        if: ${{ !matrix.needsX86DotnetRoot }}
         run: dotnet restore -p:MyRuntimeIdentifier=${{ matrix.platform }}
       - name: Build
-        if: ${{ !matrix.needsX86DotnetRoot }}
         run: dotnet build --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
       - name: Test
-        if: ${{ !matrix.needsX86DotnetRoot }}
         run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
       - name: Publish
-        if: ${{ !matrix.needsX86DotnetRoot }}
         run: dotnet publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.platform }}
       - name: Upload dotnet test results
         uses: actions/upload-artifact@v6
