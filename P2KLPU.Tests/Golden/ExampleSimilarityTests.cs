@@ -19,8 +19,8 @@ public sealed class ExampleSimilarityTests
     [Fact]
     public void ExampleUnprocessed_WhenProcessed_IsCloseToExampleProcessedFixture_ByLineIndex()
     {
-        var unprocessedPath = GetRepoFilePath("dotnet-p2pp-poc", "samples", "input", "example_unprocessed.gcode");
-        var processedFixturePath = GetRepoFilePath("dotnet-p2pp-poc", "samples", "output", "example_processed.gcode");
+        var unprocessedPath = GetRepoFilePath("samples", "input", "example_unprocessed.gcode");
+        var processedFixturePath = GetRepoFilePath("samples", "output", "example_processed.gcode");
 
         var inputLines = File.ReadAllLines(unprocessedPath);
         var expectedLines = File.ReadAllLines(processedFixturePath);
@@ -170,16 +170,15 @@ public sealed class ExampleSimilarityTests
 
     private static string GetRepoFilePath(params string[] parts)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null)
-        {
-            var candidate = Path.Combine(new[] { dir.FullName }.Concat(parts).ToArray());
-            if (File.Exists(candidate))
-                return candidate;
+        // Test data files are copied into the test output directory.
+        // Keep path resolution stable by resolving relative to AppContext.BaseDirectory.
+        var baseDir = AppContext.BaseDirectory;
+        var candidate = Path.Combine(new[] { baseDir }.Concat(parts).ToArray());
+        if (File.Exists(candidate))
+            return candidate;
 
-            dir = dir.Parent;
-        }
-
-        throw new FileNotFoundException("Could not locate repo file", Path.Combine(parts));
+        throw new FileNotFoundException(
+            "Could not locate test data file in output directory. Ensure P2KLPU.Tests.csproj copies samples/ and Fixtures/ to the test output.",
+            candidate);
     }
 }

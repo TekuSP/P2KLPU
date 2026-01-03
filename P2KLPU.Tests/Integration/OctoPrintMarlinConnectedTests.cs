@@ -11,7 +11,7 @@ public sealed class OctoPrintMarlinConnectedTests
     [Fact]
     public void OctoPrintStripOmegaCommands_Marlin_RewritesOCommandsToPluginComments()
     {
-        var inputPath = GetRepoFilePath("dotnet-p2pp-poc", "samples", "input", "_sample_octoprint_marlin_connected.gcode");
+        var inputPath = GetRepoFilePath("samples", "input", "_sample_octoprint_marlin_connected.gcode");
         var lines = File.ReadAllLines(inputPath);
 
         var options = new Options(
@@ -108,16 +108,12 @@ public sealed class OctoPrintMarlinConnectedTests
 
     private static string GetRepoFilePath(params string[] parts)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null)
-        {
-            var candidate = Path.Combine(new[] { dir.FullName }.Concat(parts).ToArray());
-            if (File.Exists(candidate))
-                return candidate;
+        var candidate = Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray());
+        if (File.Exists(candidate))
+            return candidate;
 
-            dir = dir.Parent;
-        }
-
-        throw new FileNotFoundException("Could not locate repo file", Path.Combine(parts));
+        throw new FileNotFoundException(
+            "Could not locate test data file in output directory. Ensure P2KLPU.Tests.csproj copies samples/ and Fixtures/ to the test output.",
+            candidate);
     }
 }

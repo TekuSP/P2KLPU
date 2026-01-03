@@ -22,4 +22,10 @@
   <ItemGroup>
     <ProjectReference Include="..\P2KLPU.csproj" />
   </ItemGroup>
+
+  <ItemGroup>
+    <!-- Test data files (golden samples + fixtures). Keep available under AppContext.BaseDirectory. -->
+    <None Include="..\samples\**\*" Link="samples\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\**\*" Link="Fixtures\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

@@ -11,7 +11,7 @@ public sealed class PaletteCommandGenerationTests
     [Fact]
     public void ExampleProcessed_Defaults_Klipper_O1O31StreamMatchesFixture()
     {
-        var inputPath = GetRepoFilePath("dotnet-p2pp-poc", "samples", "output", "example_processed.gcode");
+        var inputPath = GetRepoFilePath("samples", "output", "example_processed.gcode");
         var outputLines = RunProcessorForTest(inputPath);
 
         AssertNoPauseImmediatelyAfterFirstO1(outputLines);
@@ -25,7 +25,7 @@ public sealed class PaletteCommandGenerationTests
     [Fact]
     public void ExampleUnprocessed_Defaults_Klipper_O1O31StreamMatchesFixture()
     {
-        var inputPath = GetRepoFilePath("dotnet-p2pp-poc", "samples", "input", "example_unprocessed.gcode");
+        var inputPath = GetRepoFilePath("samples", "input", "example_unprocessed.gcode");
         var outputLines = RunProcessorForTest(inputPath);
 
         AssertNoPauseImmediatelyAfterFirstO1(outputLines);
@@ -39,7 +39,7 @@ public sealed class PaletteCommandGenerationTests
     [Fact]
     public void SyncPingMacroOverride_ReplacesPingBarrierInsidePingBlocks()
     {
-        var inputPath = GetRepoFilePath("dotnet-p2pp-poc", "samples", "output", "example_processed.gcode");
+        var inputPath = GetRepoFilePath("samples", "output", "example_processed.gcode");
         var outputLines = RunProcessorForTest(inputPath, syncPingMacroOverride: "MyOwnMacro");
 
         AssertPingBlocksHaveBarrierThenO31(outputLines, expectedBarrier: "MyOwnMacro");
@@ -184,7 +184,7 @@ public sealed class PaletteCommandGenerationTests
 
     private static IReadOnlyList<string> ReadFixtureLines(string fixtureName)
     {
-        var path = GetRepoFilePath("dotnet-p2pp-poc", "P2KLPU.Tests", "Fixtures", fixtureName);
+        var path = GetRepoFilePath("Fixtures", fixtureName);
         return File.ReadAllLines(path)
             .Select(l => l.Trim())
             .Where(l => l.Length != 0)
@@ -202,16 +202,12 @@ public sealed class PaletteCommandGenerationTests
 
     private static string GetRepoFilePath(params string[] parts)
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
-        while (dir != null)
-        {
-            var candidate = Path.Combine(new[] { dir.FullName }.Concat(parts).ToArray());
-            if (File.Exists(candidate))
-                return candidate;
+        var candidate = Path.Combine(new[] { AppContext.BaseDirectory }.Concat(parts).ToArray());
+        if (File.Exists(candidate))
+            return candidate;
 
-            dir = dir.Parent;
-        }
-
-        throw new FileNotFoundException("Could not locate repo file", Path.Combine(parts));
+        throw new FileNotFoundException(
+            "Could not locate test data file in output directory. Ensure P2KLPU.Tests.csproj copies samples/ and Fixtures/ to the test output.",
+            candidate);
     }
 }
