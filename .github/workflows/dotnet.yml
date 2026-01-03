@@ -48,6 +48,8 @@ jobs:
     runs-on: ${{ matrix.runsOn }}
     steps:
       - uses: actions/checkout@v6
+
+      # Black magic for x86 .NET
       - name: Setup .NET x86 (Windows x86 workaround)
         if: ${{ matrix.needsX86DotnetRoot }}
         uses: actions/setup-dotnet@v5
@@ -61,6 +63,8 @@ jobs:
         shell: pwsh
         run: |
           "DOTNET_ROOT(x86)=${env:DOTNET_ROOT}" | Out-File -FilePath $env:GITHUB_ENV -Append
+      # End of Black magic for x86 .NET    
+      
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
         with:
@@ -70,19 +74,19 @@ jobs:
       - name: Build
         run: dotnet build --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
       - name: Test
-        run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
+        run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
       - name: Publish
-        run: dotnet publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.platform }}
+        run: dotnet publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
       - name: Upload dotnet test results
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
         with:
-          name: dotnet-results-${{ matrix.platform }}
-          path: TestResults-${{ matrix.platform }}
+          name: Unit Test Results - ${{ matrix.os }} - ${{ matrix.platform }}
+          path: TestResults-${{ matrix.os }}-${{ matrix.platform }}
       - name: Upload build
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
         continue-on-error: true
         with:
           name: P2KLPU - ${{ matrix.os }} - ${{ matrix.platform }}
-          path: ./Publish/${{ matrix.platform }}
+          path: ./Publish/${{ matrix.os }}/${{ matrix.platform }}
