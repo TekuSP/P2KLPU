@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Personal Telegram
+    url: https://t.me/TekuSP
+    about: If you have urgent questions, you can telegram me.
+  - name: Security Vulnerabilities
+    url: mailto:richard.torhan@windowslive.com
+    about: Please report security vulnerabilities here.
