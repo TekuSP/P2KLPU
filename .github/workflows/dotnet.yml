@@ -11,19 +11,109 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-
-    runs-on: windows-latest
-
-    steps:
+  build_windows:
+   strategy:
+    matrix:
+      platform: [win-x64, win-86, win-arm64]
+   runs-on: windows-latest  # For a list of available runner types, refer to
+                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-o
+   steps:
     - uses: actions/checkout@v4
     - name: Setup .NET
       uses: actions/setup-dotnet@v4
       with:
         dotnet-version: 10.0.x
     - name: Restore dependencies
-      run: dotnet restore
+      run: dotnet restore --runtime ${{ matrix.platform }} --configuration Release
     - name: Build
-      run: dotnet build --no-restore
+      run: dotnet build --no-restore --runtime ${{ matrix.platform }} --configuration Release
     - name: Test
-      run: dotnet test --no-build --verbosity normal
+      run: dotnet test --no-build --verbosity normal --runtime ${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
+    - name: Publish 
+      run: dotnet publish --no-build --no-restore --runtime ${{ matrix.platform }} --configuration Release --output ./Publish 
+    - name: Upload dotnet test results
+      uses: actions/upload-artifact@v6
+      with:
+         name: dotnet-results-${{ matrix.platform }}
+         path: TestResults-${{ matrix.platform }}
+       # Use always() to always run this step to publish test results when there are test failures
+      if: ${{ always() }}
+         
+    - name: Upload Windows build
+      uses: actions/upload-artifact@v6
+      continue-on-error: true
+      with:
+         name: P2KLPU - Windows - ${{ matrix.platform }}
+         path: ./Publish
+         
+  build_server_app_linux:
+   strategy:
+    matrix:
+      platform: [linux-x64, linux-arm64]
+   runs-on: ubuntu-latest  # For a list of available runner types, refer to
+                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
+   steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Restore dependencies
+      run: dotnet restore --runtime ${{ matrix.platform }} --configuration Release
+    - name: Build
+      run: dotnet build --no-restore --runtime ${{ matrix.platform }} --configuration Release
+    - name: Test
+      run: dotnet test --no-build --verbosity normal --runtime ${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
+    - name: Publish 
+      run: dotnet publish --no-build --no-restore --runtime ${{ matrix.platform }} --configuration Release --output ./Publish 
+    - name: Upload dotnet test results
+      uses: actions/upload-artifact@v6
+      with:
+         name: dotnet-results-${{ matrix.platform }}
+         path: TestResults-${{ matrix.platform }}
+       # Use always() to always run this step to publish test results when there are test failures
+      if: ${{ always() }}
+         
+    - name: Upload Linux build
+      uses: actions/upload-artifact@v6
+      continue-on-error: true
+      with:
+         name: P2KLPU - Linux - ${{ matrix.platform }}
+         path: ./Publish
+         
+  build_server_app_macosx:
+   strategy:
+    matrix:
+      configuration: [Debug,Release]
+      platform: [osx-x64, osx-arm64]
+   runs-on: macos-latest  # For a list of available runner types, refer to
+                             # https://help.github.com/en/actions/reference/workflow-syntax-for-github-actions#jobsjob_idruns-on
+  
+   steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Restore dependencies
+      run: dotnet restore --runtime ${{ matrix.platform }} --configuration Release
+    - name: Build
+      run: dotnet build --no-restore --runtime ${{ matrix.platform }} --configuration Release
+    - name: Test
+      run: dotnet test --no-build --verbosity normal --runtime ${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.platform }}"
+    - name: Publish 
+      run: dotnet publish --no-build --no-restore --runtime ${{ matrix.platform }} --configuration Release --output ./Publish 
+    - name: Upload dotnet test results
+      uses: actions/upload-artifact@v6
+      with:
+         name: dotnet-results-${{ matrix.platform }}
+         path: TestResults-${{ matrix.platform }}
+       # Use always() to always run this step to publish test results when there are test failures
+      if: ${{ always() }}
+         
+    - name: Upload MacOSX build
+      uses: actions/upload-artifact@v6
+      continue-on-error: true
+      with:
+         name: P2KLPU - MacOSX - ${{ matrix.platform }}
+         path: ./Publish
