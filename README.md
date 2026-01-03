@@ -1,5 +1,6 @@
 # P2KLPU .NET POC
-[![Build Status of CI](https://github.com/TekuSP/P2KLPU/actions/workflows/dotnet.yml/badge.svg)](https://github.com/TekuSP/P2KLPU/actions/workflows/dotnet.yml)
+[![.NET](https://github.com/TekuSP/P2KLPU/actions/workflows/dotnet.yml/badge.svg?branch=master)](https://github.com/TekuSP/P2KLPU/actions/workflows/dotnet.yml)
+[![CodeQL](https://github.com/TekuSP/P2KLPU/actions/workflows/code2ql.yml/badge.svg?branch=master)](https://github.com/TekuSP/P2KLPU/actions/workflows/code2ql.yml)
 
 ### This tool is used for Directly Connected Palette 2/2S to your Klipper Printer, like Voron using https://www.klipper3d.org/Config_Reference.html#palette2
 ### It uses built.in Slicer wipe tower, there are plans to make calculation of wiping different, and this software recommending how much you need to add to not have short splices.
