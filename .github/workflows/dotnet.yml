@@ -72,11 +72,11 @@ jobs:
       - name: Restore dependencies
         run: dotnet restore -p:MyRuntimeIdentifier=${{ matrix.platform }}
       - name: Build
-        run: dotnet build --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
+        run: dotnet build -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
       - name: Test
         run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
       - name: Publish
-        run: dotnet publish ./P2KLPU.csproj --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
+        run: dotnet publish ./P2KLPU.csproj -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
       - name: Upload dotnet test results
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
