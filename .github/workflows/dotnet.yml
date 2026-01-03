@@ -47,7 +47,7 @@ jobs:
             needsX86DotnetRoot: false
     runs-on: ${{ matrix.runsOn }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
       # Black magic for x86 .NET
       - name: Setup .NET x86 (Windows x86 workaround)
@@ -70,13 +70,43 @@ jobs:
         with:
           dotnet-version: 10.0.x
       - name: Restore dependencies
-        run: dotnet restore -p:MyRuntimeIdentifier=${{ matrix.platform }}
+        run: dotnet restore ./P2KLPU.sln -r ${{ matrix.platform }} -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:PublishSingleFile=true -p:SelfContained=false -p:DebugSymbols=true -p:DebugType=portable
       - name: Build
-        run: dotnet build -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release
+        run: dotnet build -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable
       - name: Test
         run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
       - name: Publish
-        run: dotnet publish ./P2KLPU.csproj -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
+        run: dotnet publish ./P2KLPU.csproj -p:PublishSingleFile=true --self-contained false --no-restore -p:MyRuntimeIdentifier=${{ matrix.platform }} --configuration Release -p:DebugSymbols=true -p:DebugType=portable --output ./Publish/${{ matrix.os }}/${{ matrix.platform }}
+
+      - name: Collect symbols + strip from publish
+        shell: pwsh
+        run: |
+          $publishDir = "./Publish/${{ matrix.os }}/${{ matrix.platform }}"
+          $symbolsDir = "./Symbols/${{ matrix.os }}/${{ matrix.platform }}"
+
+          New-Item -ItemType Directory -Force -Path $symbolsDir | Out-Null
+
+          # Copy PDBs (portable symbols)
+          Get-ChildItem -Path $publishDir -Recurse -File -Filter *.pdb | ForEach-Object {
+            $rel = Resolve-Path -LiteralPath $_.FullName | ForEach-Object { $_.Path }
+            Copy-Item -Force -LiteralPath $_.FullName -Destination $symbolsDir
+          }
+
+          # Copy macOS .dSYM bundles (directories)
+          Get-ChildItem -Path $publishDir -Recurse -Directory | Where-Object { $_.Name.EndsWith('.dSYM', [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object {
+            Copy-Item -Recurse -Force -LiteralPath $_.FullName -Destination (Join-Path $symbolsDir $_.Name)
+          }
+
+          # Strip symbols from the publish output (end-user artifact)
+          Get-ChildItem -Path $publishDir -Recurse -File -Filter *.pdb | Remove-Item -Force
+          Get-ChildItem -Path $publishDir -Recurse -Directory | Where-Object { $_.Name.EndsWith('.dSYM', [System.StringComparison]::OrdinalIgnoreCase) } | Remove-Item -Recurse -Force
+
+      - name: Upload symbols
+        uses: actions/upload-artifact@v6
+        if: ${{ always() }}
+        with:
+          name: Symbols - ${{ matrix.os }} - ${{ matrix.platform }}
+          path: ./Symbols/${{ matrix.os }}/${{ matrix.platform }}
       - name: Upload dotnet test results
         uses: actions/upload-artifact@v6
         if: ${{ always() }}
