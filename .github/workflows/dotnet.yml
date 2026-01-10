@@ -55,7 +55,7 @@ jobs:
             needsX86DotnetRoot: false
     runs-on: ${{ matrix.runsOn }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # Black magic for x86 .NET
       - name: Setup .NET x86 (Windows x86 workaround)
