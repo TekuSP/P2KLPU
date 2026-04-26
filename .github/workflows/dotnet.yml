@@ -85,7 +85,7 @@ jobs:
         run: dotnet test --no-build -p:MyRuntimeIdentifier=${{ matrix.platform }} -p:Version=${{ env.VERSION_PREFIX }}.${{ github.run_number }} -p:InformationalVersion=${{ env.VERSION_PREFIX }}.${{ github.run_number }}+${{ github.sha }} --configuration Release --verbosity normal --logger trx --results-directory "TestResults-${{ matrix.os }}-${{ matrix.platform }}"
 
       - name: Test report (TRX)
-        uses: dorny/test-reporter@v2
+        uses: dorny/test-reporter@v3
         if: ${{ !cancelled() }}
         with:
           name: Tests - ${{ matrix.os }} - ${{ matrix.platform }}
