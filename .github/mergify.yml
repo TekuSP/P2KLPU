@@ -2,27 +2,6 @@ pull_request_rules:
   - name: Automatically Dependenabot bot's PRs
     conditions:
       - author=dependabot[bot]
-      - "check-success = Build NanoFramework SLN (Release)"
-      - "#commits-behind = 0"
-    actions:
-      merge:
-        method: merge
-        commit_message_template: |
-          Automerge from {{ head }}
-
-          {{ title }} (#{{ number }})
-
-          {{ body }}
-      label:
-        toggle:
-          - cleanup
-          - automated
-
-  - name: Automatically Nanodu Dependenabot bot's PRs
-    conditions:
-      - author=TekuSP
-      - "head ~=nfbot/update-dependencies/"
-      - "check-success = Build NanoFramework SLN (Release)"
       - "#commits-behind = 0"
     actions:
       merge:
@@ -42,7 +21,6 @@ pull_request_rules:
     conditions:
       - author=TekuSP
       - "head ~=update-changelog"
-      - "check-success = Build NanoFramework SLN (Release)"
       - "#commits-behind = 0"
     actions:
       merge:
@@ -62,20 +40,6 @@ pull_request_rules:
     conditions:
       - author=TekuSP
       - "head ~=update-changelog"
-      - "check-success = Build NanoFramework SLN (Release)"
-      - "#commits-behind = 0"
-    actions:
-      review:
-        type: APPROVE
-      label:
-        toggle:
-          - approved
-
-  - name: Automatically approve Nanodu Dependenabot bot's PRs
-    conditions:
-      - author=TekuSP
-      - "head ~=nfbot/update-dependencies/"
-      - "check-success = Build NanoFramework SLN (Release)"
       - "#commits-behind = 0"
     actions:
       review:
@@ -87,7 +51,6 @@ pull_request_rules:
   - name: Automatically approve Dependenabot bot's PRs
     conditions:
       - author=dependabot[bot]
-      - "check-success = Build NanoFramework SLN (Release)"
       - "#commits-behind = 0"
     actions:
       review:
@@ -100,18 +63,11 @@ pull_request_rules:
     conditions:
       - author=dependabot[bot]
       - "#commits-behind > 0"
-    actions:
-      update:
-
-  - name: Automatic update Nanodu Depenedabot pull requests if they are commits behind
-    conditions:
-      - author=TekuSP
-      - "head ~=nfbot/update-dependencies/"
-      - "#commits-behind > 0"
-    actions:
-      update:
-  - name: Automatic update ChangeRequest pull requests if they are commits behind
-    conditions:
+      actions:
+         update:
+    
+    - name: Automatic update ChangeRequest pull requests if they are commits behind
+      conditions:
       - author=TekuSP
       - "head ~=update-changelog"
       - "#commits-behind > 0"
@@ -126,19 +82,6 @@ pull_request_rules:
       label:
         toggle:
           - conflict
-
-  - name: Comment when is merged
-    conditions:
-      - merged
-      - "-head ~=update-changelog"
-      - "-head ~=nfbot/update-dependencies/"
-      - "author!=dependabot[bot]"
-    actions:
-      comment:
-        message: Thank you for your contribution @{{author}}! Your pull request has been merged.
-      label:
-        toggle:
-          - merged
 
   - name: "Assign non Dependabot PR to author: TekuSP"
     conditions:
