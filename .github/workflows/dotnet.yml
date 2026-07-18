@@ -60,7 +60,7 @@ jobs:
       # Black magic for x86 .NET
       - name: Setup .NET x86 (Windows x86 workaround)
         if: ${{ matrix.needsX86DotnetRoot }}
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         env:
           PROCESSOR_ARCHITECTURE: x86
           DOTNET_INSTALL_DIR: C:\Program Files (x86)\dotnet
@@ -74,7 +74,7 @@ jobs:
       # End of Black magic for x86 .NET    
       
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 10.0.x
       - name: Restore dependencies
