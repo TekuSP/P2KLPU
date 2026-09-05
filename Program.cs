@@ -7,6 +7,23 @@ using System.Text;
 
 internal static class Program
 {
+    /// <summary>Default Palette printer profile ("P2PPINFO" in ASCII hex) used when nothing better is available.</summary>
+    private const string DefaultPrinterProfileHex = "50325050494e464f";
+
+    /// <summary>
+    /// Derives a stable 16-hex-digit Palette printer profile ID from the slicer's printer profile name.
+    /// The same name always yields the same ID, so the Palette recognizes the printer across jobs.
+    /// </summary>
+    private static string DerivePrinterProfileHex(string printerName)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(
+            Encoding.UTF8.GetBytes(printerName.Trim().ToUpperInvariant()));
+        var sb = new StringBuilder(16);
+        for (var i = 0; i < 8; i++)
+            sb.Append(bytes[i].ToString("x2", CultureInfo.InvariantCulture));
+        return sb.ToString();
+    }
+
     // P2KLPU (Palette To Klipper Postprocessing Unit) .NET POC (Klipper-first)
     // Goals:
     //  1) Match PrusaSlicer post-processing contract (input.gcode [output.gcode]).
@@ -216,7 +233,8 @@ internal static class Program
                 || key.Equals("PING_MACRO_BEFORE", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("PING_MACRO_AFTER", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("SPOOLMAN_SET_ACTIVE_SPOOL", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase);
+                || key.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("STRICT", StringComparison.OrdinalIgnoreCase);
         }
 
         // OctoPrint Palette2 plugin compatibility:
@@ -281,12 +299,35 @@ internal static class Program
             }
         }
 
+        // No explicit PRINTERPROFILE: derive a stable ID from the PrusaSlicer printer profile name,
+        // so the same printer always produces the same Palette profile without manual setup.
+        if (options.PrinterProfileHex == DefaultPrinterProfileHex)
+        {
+            var printerName = SlicerConfigDetector.TryReadPrusaValue(lines, "printer_settings_id");
+            if (!string.IsNullOrWhiteSpace(printerName))
+            {
+                options = options with { PrinterProfileHex = DerivePrinterProfileHex(printerName) };
+                Console.WriteLine($"No PRINTERPROFILE directive found; derived profile {options.PrinterProfileHex} from printer profile name '{printerName}'.");
+            }
+        }
+
         var analysis = GcodeAnalyzer.Analyze(lines, options);
         Console.WriteLine(analysis.ToConsoleString(displayName, options.Verbose));
 
         if (options.DryRun)
         {
             return Exit(0, options, env);
+        }
+
+        // Strict mode (default): fail the export on error-level findings so the slicer surfaces them.
+        // PrusaSlicer only shows post-processing output when the script exits non-zero.
+        if (analysis.HasErrors && options.Strict)
+        {
+            Console.Error.WriteLine("P2KLPU: refusing to write output because of the following errors:");
+            foreach (var e in analysis.Errors)
+                Console.Error.WriteLine($"  - {e}");
+            Console.Error.WriteLine("Fix the issues above, or add ';P2KLPU STRICT=0' to your start G-code to write the output anyway.");
+            return Exit(1, options, env);
         }
 
         // Minimal transformation (Klipper-first), with pass-through Marlin mode unless overridden.

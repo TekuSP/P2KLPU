@@ -7,11 +7,16 @@ using System.Globalization;
 /// tool usage, effective extrusion, splices, pings, and (when possible) wipe-tower vs model breakdown.
 /// </summary>
 /// <remarks>
-/// This is pass 1 of the two-pass RAW_MMU pipeline.
+/// This is pass 1 of the two-pass RAW_MMU pipeline and the single source of truth for all
+/// per-line rewrite decisions (which lines are stripped, where ping blocks go). Pass 2 replays
+/// these decisions verbatim so header positions always match the rewritten file.
 ///
-/// The scan intentionally excludes toolchange logistics (typically large E-only moves around tool changes)
-/// from the "effective" extrusion accumulator, since connected-mode splice and ping planning should be based
-/// on print-relevant filament usage.
+/// Extrusion is accounted NET (retracts subtract): the Palette's encoder sees net filament
+/// movement, so splice/ping positions are planned along the net extrusion timeline.
+///
+/// E-only moves inside toolchange regions are stripped only when their magnitude reaches
+/// <see cref="Options.MmuEOnlyStripThresholdMm"/>; small retract/unretract pairs survive so the
+/// printed file still protects against ooze during the toolchange wipe.
 ///
 /// Tower vs model attribution prefers PrusaSlicer/Slic3r <c>;TYPE:</c> markers; when those markers are absent,
 /// the scanner may fall back to heuristics and will report reduced certainty via warnings.
@@ -25,17 +30,18 @@ static class RawMmuScanner
     /// </summary>
     /// <param name="lines">Input G-code lines.</param>
     /// <param name="options">Processing options that affect ping planning and detection heuristics.</param>
-    /// <returns>A scan result describing effective extrusion, splices, pings, and diagnostics.</returns>
+    /// <returns>A scan result describing effective extrusion, splices, pings, per-line rewrite decisions, and diagnostics.</returns>
     public static RawMmuScanResult Scan(string[] lines, Options options)
     {
         var extrusionAbsolute = false;
         var lastAbsoluteE = 0.0;
 
         var totalPositiveExtrusion = 0.0;
-        var totalEffectivePositiveExtrusion = 0.0;
+        var totalEffectiveExtrusion = 0.0;
         var ignoredToolchangeEOnlyPositiveExtrusion = 0.0;
-        var towerEffectivePositiveExtrusion = 0.0;
-        var modelEffectivePositiveExtrusion = 0.0;
+        var keptToolchangeEOnlyExtrusion = 0.0;
+        var towerEffectiveExtrusion = 0.0;
+        var modelEffectiveExtrusion = 0.0;
 
         AxisAlignedBounds2D? towerBounds = null;
 
@@ -45,6 +51,7 @@ static class RawMmuScanner
         var sawExplicitToolchangeBlocks = false;
         var usedHeuristicToolchangeWindows = false;
         var sawAnyToolchange = false;
+        var sawArcMoves = false;
 
         var currentTool = -1;
         var previousSpliceLocation = 0.0;
@@ -61,9 +68,50 @@ static class RawMmuScanner
         var pingIndex = 0;
         var pings = new List<RawMmuPing>();
 
+        var strippedLineIndexes = new HashSet<int>();
+        var toolchangeCommandLines = new Dictionary<int, int>();
+        var pingsAfterLine = new Dictionary<int, IReadOnlyList<RawMmuPing>>();
+
         var inToolchange = false;
         var inExplicitToolchangeBlock = false;
         var toolchangeLinesLeft = 0;
+
+        void RecordSplice(int newTool, double extraTailMm = 0)
+        {
+            var location = totalEffectiveExtrusion + options.SpliceOffsetMm + extraTailMm;
+            var length = location - previousSpliceLocation;
+            previousSpliceLocation = location;
+
+            splices.Add(new RawMmuSplice(
+                Index: ++spliceIndex,
+                FromTool: currentTool,
+                ToTool: newTool,
+                EffectiveLocationMm: location,
+                EffectiveLengthMm: length));
+        }
+
+        void OnToolchangeCommand(int lineIndex, int newTool)
+        {
+            sawAnyToolchange = true;
+            toolchangeCommandLines[lineIndex] = newTool;
+
+            if (currentTool >= 0 && newTool != currentTool)
+            {
+                // Only enable heuristic toolchange window if we are not inside an explicit toolchange block.
+                if (!inExplicitToolchangeBlock)
+                {
+                    inToolchange = true;
+                    toolchangeLinesLeft = options.MmuToolchangeWindowLines;
+                    usedHeuristicToolchangeWindows = options.MmuToolchangeWindowLines > 0;
+                }
+
+                RecordSplice(newTool);
+            }
+
+            currentTool = newTool;
+            if (currentTool >= 0)
+                toolsUsed.Add(currentTool);
+        }
 
         for (var i = 0; i < lines.Length; i++)
         {
@@ -94,15 +142,13 @@ static class RawMmuScanner
                 // These exist in different PrusaSlicer exports:
                 //   ; CP TOOLCHANGE START / END
                 //   ; TOOLCHANGE START / END
-                if (trimmed.Contains("CP TOOLCHANGE START", StringComparison.OrdinalIgnoreCase)
-                    || trimmed.Contains("TOOLCHANGE START", StringComparison.OrdinalIgnoreCase))
+                if (trimmed.Contains("TOOLCHANGE START", StringComparison.OrdinalIgnoreCase))
                 {
                     inToolchange = true;
                     inExplicitToolchangeBlock = true;
                     sawExplicitToolchangeBlocks = true;
                 }
-                else if (trimmed.Contains("CP TOOLCHANGE END", StringComparison.OrdinalIgnoreCase)
-                    || trimmed.Contains("TOOLCHANGE END", StringComparison.OrdinalIgnoreCase))
+                else if (trimmed.Contains("TOOLCHANGE END", StringComparison.OrdinalIgnoreCase))
                 {
                     inToolchange = false;
                     inExplicitToolchangeBlock = false;
@@ -136,32 +182,7 @@ static class RawMmuScanner
 
             if (TryParseToolChange(code, out var newTool))
             {
-                sawAnyToolchange = true;
-                if (currentTool >= 0 && newTool != currentTool)
-                {
-                    // Only enable heuristic toolchange window if we are not inside an explicit toolchange block.
-                    if (!inExplicitToolchangeBlock)
-                    {
-                        inToolchange = true;
-                        toolchangeLinesLeft = options.MmuToolchangeWindowLines;
-                        usedHeuristicToolchangeWindows = options.MmuToolchangeWindowLines > 0;
-                    }
-
-                    var location = totalEffectivePositiveExtrusion + options.SpliceOffsetMm;
-                    var length = location - previousSpliceLocation;
-                    previousSpliceLocation = location;
-
-                    splices.Add(new RawMmuSplice(
-                        Index: ++spliceIndex,
-                        FromTool: currentTool,
-                        ToTool: newTool,
-                        EffectiveLocationMm: location,
-                        EffectiveLengthMm: length));
-                }
-
-                currentTool = newTool;
-                if (currentTool >= 0)
-                    toolsUsed.Add(currentTool);
+                OnToolchangeCommand(i, newTool);
                 continue;
             }
 
@@ -170,70 +191,53 @@ static class RawMmuScanner
                 var tool = TryParseKlipperActivateExtruder(code);
                 if (tool.HasValue)
                 {
-                    sawAnyToolchange = true;
-                    var newTool2 = tool.Value;
-                    if (currentTool >= 0 && newTool2 != currentTool)
-                    {
-                        if (!inExplicitToolchangeBlock)
-                        {
-                            inToolchange = true;
-                            toolchangeLinesLeft = options.MmuToolchangeWindowLines;
-                            usedHeuristicToolchangeWindows = options.MmuToolchangeWindowLines > 0;
-                        }
-
-                        var location = totalEffectivePositiveExtrusion + options.SpliceOffsetMm;
-                        var length = location - previousSpliceLocation;
-                        previousSpliceLocation = location;
-
-                        splices.Add(new RawMmuSplice(
-                            Index: ++spliceIndex,
-                            FromTool: currentTool,
-                            ToTool: newTool2,
-                            EffectiveLocationMm: location,
-                            EffectiveLengthMm: length));
-                    }
-
-                    currentTool = newTool2;
-                    if (currentTool >= 0)
-                        toolsUsed.Add(currentTool);
+                    OnToolchangeCommand(i, tool.Value);
                     continue;
                 }
             }
 
-            if (code.StartsWith("G0", StringComparison.OrdinalIgnoreCase) || code.StartsWith("G1", StringComparison.OrdinalIgnoreCase))
+            if (IsExtrusionMoveCommand(code, out var isArc))
             {
+                if (isArc)
+                    sawArcMoves = true;
+
                 if (TryGetParam(code, 'E', out var e))
                 {
-                    // Compute raw positive extrusion for diagnostics (includes toolchange logistics).
-                    var positiveRaw = 0.0;
+                    // Net delta the printer (and the Palette's encoder) will see for this move.
+                    double delta;
                     if (!extrusionAbsolute)
                     {
-                        if (e > 0)
-                            positiveRaw = e;
+                        delta = e;
                     }
                     else
                     {
-                        var deltaRaw = e - lastAbsoluteE;
-                        if (deltaRaw > 0)
-                            positiveRaw = deltaRaw;
+                        delta = e - lastAbsoluteE;
                         lastAbsoluteE = e;
                     }
 
-                    if (positiveRaw > 0)
-                        totalPositiveExtrusion += positiveRaw;
+                    // Positive-only accumulator kept as a diagnostic (includes toolchange logistics).
+                    if (delta > 0)
+                        totalPositiveExtrusion += delta;
 
-                    // Ignore ALL E-only moves while inside a toolchange: unload/load/retract/prime.
+                    // Strip large E-only moves inside a toolchange region: unload/load/ram logistics.
+                    // Small E-only moves (retract/unretract pairs) are kept so the printed file still
+                    // protects against ooze; with net accounting they cancel out.
                     // This preserves wipe tower geometry which has X/Y.
-                    if (inToolchange && IsEOnlyMove(code))
+                    var isEOnly = IsEOnlyMove(code);
+                    if (inToolchange && isEOnly && ShouldStripEOnly(delta, options.MmuEOnlyStripThresholdMm))
                     {
-                        if (positiveRaw > 0)
-                            ignoredToolchangeEOnlyPositiveExtrusion += positiveRaw;
+                        strippedLineIndexes.Add(i);
+                        if (delta > 0)
+                            ignoredToolchangeEOnlyPositiveExtrusion += delta;
                         continue;
                     }
 
-                    if (positiveRaw > 0)
+                    if (delta != 0)
                     {
-                        totalEffectivePositiveExtrusion += positiveRaw;
+                        totalEffectiveExtrusion += delta;
+
+                        if (inToolchange && isEOnly)
+                            keptToolchangeEOnlyExtrusion += delta;
 
                         var isTowerMove = IsTowerExtrusionMove(
                             sawTypeMarkers: sawTypeMarkers,
@@ -243,12 +247,13 @@ static class RawMmuScanner
                             code: code);
 
                         if (isTowerMove)
-                            towerEffectivePositiveExtrusion += positiveRaw;
+                            towerEffectiveExtrusion += delta;
                         else
-                            modelEffectivePositiveExtrusion += positiveRaw;
+                            modelEffectiveExtrusion += delta;
 
-                        if (isTowerMove && TryGetParam(code, 'X', out var x) && TryGetParam(code, 'Y', out var y))
+                        if (delta > 0 && isTowerMove && TryGetParam(code, 'X', out var x) && TryGetParam(code, 'Y', out var y))
                         {
+                            // Arc endpoints slightly underestimate the true bounds (arc bulge); acceptable for diagnostics.
                             towerBounds = towerBounds is null
                                 ? new AxisAlignedBounds2D(x, y, x, y)
                                 : new AxisAlignedBounds2D(
@@ -258,11 +263,22 @@ static class RawMmuScanner
                                     MaxY: Math.Max(towerBounds.Value.MaxY, y));
                         }
 
-                        if (pingPlanner.ShouldInsertPing(totalEffectivePositiveExtrusion))
+                        if (delta > 0 && pingPlanner.ShouldInsertPing(totalEffectiveExtrusion))
                         {
-                            var pingAt = totalEffectivePositiveExtrusion;
-                            pings.Add(new RawMmuPing(Index: ++pingIndex, EffectiveLocationMm: pingAt));
+                            var pingAt = totalEffectiveExtrusion;
+                            var ping = new RawMmuPing(Index: ++pingIndex, EffectiveLocationMm: pingAt);
+                            pings.Add(ping);
                             pingPlanner.OnPingInserted(pingAt);
+
+                            if (pingsAfterLine.TryGetValue(i, out var existing))
+                            {
+                                var extended = new List<RawMmuPing>(existing) { ping };
+                                pingsAfterLine[i] = extended;
+                            }
+                            else
+                            {
+                                pingsAfterLine[i] = new List<RawMmuPing> { ping };
+                            }
                         }
                     }
                 }
@@ -277,6 +293,14 @@ static class RawMmuScanner
                 if (toolchangeLinesLeft <= 0)
                     inToolchange = false;
             }
+        }
+
+        // Final end-of-print splice: the Palette needs a splice entry covering the last tool's
+        // segment through the end of the print (plus the extra end-of-print filament tail).
+        // Matches P2PP's gcode_process_toolchange(-1) end-of-file handling.
+        if (currentTool >= 0)
+        {
+            RecordSplice(newTool: -1, extraTailMm: options.ExtraEndFilamentMm);
         }
 
         // Stable ordering is useful for deterministic headers.
@@ -294,27 +318,75 @@ static class RawMmuScanner
         // When no tower signals exist, treat everything as model.
         if (detection == TowerDetectionMethod.None)
         {
-            towerEffectivePositiveExtrusion = 0.0;
-            modelEffectivePositiveExtrusion = totalEffectivePositiveExtrusion;
+            towerEffectiveExtrusion = 0.0;
+            modelEffectiveExtrusion = totalEffectiveExtrusion;
             towerBounds = null;
         }
 
         return new RawMmuScanResult(
             ExtrusionIsAbsolute: extrusionAbsolute,
             TotalPositiveExtrusionMm: totalPositiveExtrusion,
-            TotalEffectivePositiveExtrusionMm: totalEffectivePositiveExtrusion,
-            TowerEffectivePositiveExtrusionMm: towerEffectivePositiveExtrusion,
-            ModelEffectivePositiveExtrusionMm: modelEffectivePositiveExtrusion,
+            TotalEffectiveExtrusionMm: totalEffectiveExtrusion,
+            TowerEffectiveExtrusionMm: towerEffectiveExtrusion,
+            ModelEffectiveExtrusionMm: modelEffectiveExtrusion,
             IgnoredToolchangeEOnlyPositiveExtrusionMm: ignoredToolchangeEOnlyPositiveExtrusion,
+            KeptToolchangeEOnlyExtrusionMm: keptToolchangeEOnlyExtrusion,
             TowerBounds: towerBounds,
             TowerDetection: detection,
             SawTypeMarkers: sawTypeMarkers,
             SawExplicitToolchangeBlocks: sawExplicitToolchangeBlocks,
             UsedHeuristicToolchangeWindows: usedHeuristicToolchangeWindows,
             SawAnyToolchange: sawAnyToolchange,
+            SawArcMoves: sawArcMoves,
             ToolsUsed: toolsUsedList,
             Splices: splices,
-            Pings: pings);
+            Pings: pings,
+            StrippedLineIndexes: strippedLineIndexes,
+            ToolchangeCommandLines: toolchangeCommandLines,
+            PingsAfterLine: pingsAfterLine);
+    }
+
+    private static bool ShouldStripEOnly(double delta, double thresholdMm)
+    {
+        // Threshold <= 0 keeps the legacy behavior of stripping every in-window E-only move.
+        if (thresholdMm <= 0)
+            return true;
+        return Math.Abs(delta) >= thresholdMm;
+    }
+
+    /// <summary>
+    /// Matches linear (G0/G1) and arc (G2/G3) moves by exact first token, so probe/home style
+    /// commands like G28/G29/G32 or firmware retract G10/G11 are never mistaken for moves.
+    /// </summary>
+    private static bool IsExtrusionMoveCommand(string code, out bool isArc)
+    {
+        isArc = false;
+        if (code.Length < 2)
+            return false;
+        if (code[0] is not ('G' or 'g'))
+            return false;
+
+        var end = 1;
+        while (end < code.Length && code[end] != ' ')
+            end++;
+
+        var token = code[1..end];
+        switch (token)
+        {
+            case "0":
+            case "00":
+            case "1":
+            case "01":
+                return true;
+            case "2":
+            case "02":
+            case "3":
+            case "03":
+                isArc = true;
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool IsTowerExtrusionMove(bool sawTypeMarkers, bool inWipeTower, bool inExplicitToolchangeBlock, bool inToolchange, string code)

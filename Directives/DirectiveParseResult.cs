@@ -47,6 +47,7 @@ sealed record DirectiveParseResult(
         var pingMacroAfter = options.PingMacroAfter;
         var emitSetActiveSpool = options.EmitSetActiveSpool;
         var octoPrintStripOmegaCommands = options.OctoPrintStripOmegaCommands;
+        var strict = options.Strict;
         var algoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.AlgorithmOverrides);
         var diAlgoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.DiAlgorithmOverrides);
         var materialAlgoOverrides = new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(options.MaterialAlgorithmOverrides);
@@ -134,21 +135,18 @@ sealed record DirectiveParseResult(
 
             if (key is "MINSTARTSPLICE")
             {
-                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
-                {
-                    // Palette 2/2S: clamp to a conservative minimum.
-                    minStartSpliceLength = Math.Max(100.0, mm);
-                }
+                // The user's value is honored as-is; the analyzer warns when it is below the
+                // Palette 2 manual minimum (85mm) instead of silently clamping.
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                    minStartSpliceLength = mm;
                 continue;
             }
 
             if (key is "MINSPLICE")
             {
-                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
-                {
-                    // Palette 2/2S: clamp to a conservative minimum.
-                    minSpliceLength = Math.Max(70.0, mm);
-                }
+                // Honored as-is; the analyzer warns below the manual minimum (60mm).
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                    minSpliceLength = mm;
                 continue;
             }
 
@@ -171,12 +169,12 @@ sealed record DirectiveParseResult(
             //   - sets the base interval
             //   - disables growth (multiplier=1)
             //   - keeps PingMaxIntervalMm as an independent cap
-            //   - clamps to a conservative minimum
+            // The value is honored as-is; the analyzer warns when it is suspiciously small.
             if (key is "LINEARPINGLENGTH" or "LINEAR_PING_LENGTH")
             {
                 if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
                 {
-                    pingInitialInterval = Math.Max(100.0, mm);
+                    pingInitialInterval = mm;
                     pingLengthMultiplier = 1.0;
                 }
                 continue;
@@ -288,6 +286,13 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            if (key is "STRICT")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    strict = b;
+                continue;
+            }
+
             if (key is "ALGO")
             {
                 // Expected form in Value: "1-2=10,5,3" OR "1-2:10,5,3"
@@ -325,6 +330,7 @@ sealed record DirectiveParseResult(
             PingMacroBefore = pingMacroBefore,
             PingMacroAfter = pingMacroAfter,
             OctoPrintStripOmegaCommands = octoPrintStripOmegaCommands,
+            Strict = strict,
             AlgorithmOverrides = algoOverrides,
             DiAlgorithmOverrides = diAlgoOverrides,
             MaterialAlgorithmOverrides = materialAlgoOverrides

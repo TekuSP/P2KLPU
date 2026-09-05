@@ -6,6 +6,10 @@ using System.Collections.Generic;
 /// <remarks>
 /// This is produced by RAW_MMU pass-1 scanning and used by <see cref="OmegaHeaderBuilder"/>.
 /// </remarks>
+/// <param name="MaterialIdByTool">
+/// Material ID per 0-based tool as computed by <see cref="OmegaAlgorithmTableBuilder"/> so O25 and O32
+/// always agree. When null, the header builder falls back to per-type IDs.
+/// </param>
 /// <seealso cref="OmegaHeaderBuilder"/>
 /// <seealso cref="RawMmuTwoPassProcessor"/>
 sealed record OmegaHeaderBuildInput(
@@ -13,10 +17,11 @@ sealed record OmegaHeaderBuildInput(
     string PrinterProfileHex,
     double AutoloadingOffsetMm,
     double ExtraEndFilamentMm,
-    double TotalEffectivePositiveExtrusionMm,
+    double TotalEffectiveExtrusionMm,
     IReadOnlyList<string> FilamentTypes,
     IReadOnlyList<string> FilamentColorsHex,
     IReadOnlyList<int> ToolsUsed,
     IReadOnlyList<RawMmuSplice> Splices,
     IReadOnlyList<RawMmuPing> Pings,
-    IReadOnlyList<OmegaAlgorithmEntry> AlgorithmTable);
+    IReadOnlyList<OmegaAlgorithmEntry> AlgorithmTable,
+    IReadOnlyDictionary<int, int>? MaterialIdByTool = null);

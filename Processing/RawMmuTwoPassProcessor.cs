@@ -8,16 +8,13 @@ using System.Linq;
 /// Implements the RAW_MMU two-pass pipeline: scan/model first, then rewrite.
 /// </summary>
 /// <remarks>
-/// Pass 1 uses <see cref="RawMmuScanner"/> to compute effective extrusion, splices, and ping locations.
-/// Pass 2 rewrites the G-code to remove slicer/MMU logistics and inject connected-mode Palette commands
-/// (Omega header, splice schedule, and ping blocks).
-///
-/// This processor is intentionally conservative: when it cannot reliably attribute extrusion to wipe tower
-/// vs model (e.g., missing <c>;TYPE</c> markers), it emits warnings and may skip certain breakdown metrics
-/// while still producing a valid connected-mode output.
+/// Pass 1 (<see cref="RawMmuScanner"/>) computes effective extrusion, splices, ping locations, and the
+/// concrete per-line rewrite decisions. Pass 2 REPLAYS those decisions verbatim: it never re-implements
+/// the accounting state machine, so Omega header positions always match the rewritten G-code.
 /// </remarks>
 /// <seealso cref="RawMmuScanner"/>
 /// <seealso cref="OmegaHeaderBuilder"/>
+/// <seealso cref="OmegaAlgorithmTableBuilder"/>
 static class RawMmuTwoPassProcessor
 {
     /// <summary>
@@ -50,20 +47,29 @@ static class RawMmuTwoPassProcessor
             colorsForInputs = extruderColors.Count > 0 ? extruderColors : filamentColors;
         }
 
-        var algorithmTable = BuildAlgorithmTable(scan, options);
+        var algorithmTable = OmegaAlgorithmTableBuilder.Build(scan, options);
+
+        var toolsUsedForHeader = scan.ToolsUsed;
+        if (toolsUsedForHeader.Count == 0)
+        {
+            var inferred = SlicerConfigDetector.TryReadUsedExtruders(inputLines);
+            if (inferred.Count > 0)
+                toolsUsedForHeader = inferred;
+        }
 
         var headerInput = new OmegaHeaderBuildInput(
             JobName: jobName,
             PrinterProfileHex: options.PrinterProfileHex,
             AutoloadingOffsetMm: options.AutoloadingOffsetMm,
             ExtraEndFilamentMm: options.ExtraEndFilamentMm,
-            TotalEffectivePositiveExtrusionMm: scan.TotalEffectivePositiveExtrusionMm,
+            TotalEffectiveExtrusionMm: scan.TotalEffectiveExtrusionMm,
             FilamentTypes: options.FilamentTypes,
             FilamentColorsHex: colorsForInputs,
-            ToolsUsed: scan.ToolsUsed,
+            ToolsUsed: toolsUsedForHeader,
             Splices: scan.Splices,
             Pings: scan.Pings,
-            AlgorithmTable: algorithmTable);
+            AlgorithmTable: algorithmTable.Table,
+            MaterialIdByTool: algorithmTable.MaterialIdByTool);
 
         var output = new List<string>(capacity: inputLines.Length + 256);
 
@@ -77,299 +83,74 @@ static class RawMmuTwoPassProcessor
         output.Add($"; TimestampUtc: {timestampUtc:O}");
         output.Add(";");
 
-        // Pass 2 rewrite: remove toolchange commands + MMU E-only logistics, and insert ping blocks based on scan plan.
-        var pingIdx = 0;
-        var nextPing = scan.Pings.Count > 0 ? scan.Pings[0].EffectiveLocationMm : double.PositiveInfinity;
-
-        var extrusionAbsolute = scan.ExtrusionIsAbsolute;
-        var lastAbsoluteE = 0.0;
-        var totalEffectivePositiveExtrusion = 0.0;
-
-        var inToolchange = false;
-        var inCpToolchange = false;
-        var toolchangeLinesLeft = 0;
-        var currentTool = -1;
-
+        // Pass 2: replay pass-1 decisions.
         for (var i = 0; i < inputLines.Length; i++)
         {
-            var raw = inputLines[i];
-            if (string.IsNullOrWhiteSpace(raw))
+            if (scan.ToolchangeCommandLines.TryGetValue(i, out var newTool))
             {
-                output.Add(raw);
-                continue;
-            }
-
-            // PrusaSlicer wipe tower toolchanges include explicit CP markers.
-            // If present, we use them to avoid relying on a brittle line-window heuristic.
-            var trimmed = raw.Trim();
-            if (trimmed.StartsWith(";", StringComparison.Ordinal))
-            {
-                if (trimmed.Contains("CP TOOLCHANGE START", StringComparison.OrdinalIgnoreCase))
-                {
-                    inToolchange = true;
-                    inCpToolchange = true;
-                }
-                else if (trimmed.Contains("CP TOOLCHANGE END", StringComparison.OrdinalIgnoreCase))
-                {
-                    inToolchange = false;
-                    inCpToolchange = false;
-                    toolchangeLinesLeft = 0;
-                }
-
-                output.Add(raw);
-                continue;
-            }
-
-            var code = StripComment(raw);
-
-            if (code.StartsWith("M82", StringComparison.OrdinalIgnoreCase))
-            {
-                extrusionAbsolute = true;
-                output.Add(raw);
-                continue;
-            }
-            if (code.StartsWith("M83", StringComparison.OrdinalIgnoreCase))
-            {
-                extrusionAbsolute = false;
-                output.Add(raw);
-                continue;
-            }
-            if (code.StartsWith("G92", StringComparison.OrdinalIgnoreCase))
-            {
-                if (TryGetParam(code, 'E', out var eSet))
-                    lastAbsoluteE = eSet;
-                output.Add(raw);
-                continue;
-            }
-
-            if (TryParseToolChange(code, out var tTool))
-            {
-                if (currentTool >= 0 && tTool != currentTool)
-                {
-                    inToolchange = true;
-                    toolchangeLinesLeft = options.MmuToolchangeWindowLines;
-                }
-                currentTool = tTool;
-                // Strip toolchange command itself.
+                // Strip the toolchange command itself.
                 // Optional: tell Spoolman/klipper which spool is active.
                 if (options.EmitSetActiveSpool
                     && options.Firmware == FirmwareFlavor.Klipper
-                    && tTool >= 0
-                    && tTool < options.SpoolmanSpoolIds.Count
-                    && options.SpoolmanSpoolIds[tTool].HasValue)
+                    && newTool >= 0
+                    && newTool < options.SpoolmanSpoolIds.Count
+                    && options.SpoolmanSpoolIds[newTool].HasValue)
                 {
-                    output.Add($"SET_ACTIVE_SPOOL ID={options.SpoolmanSpoolIds[tTool]!.Value}");
-                }
-                continue;
-            }
-
-            if (code.StartsWith("ACTIVATE_EXTRUDER", StringComparison.OrdinalIgnoreCase))
-            {
-                var tool = TryParseKlipperActivateExtruder(code);
-                if (tool.HasValue)
-                {
-                    if (currentTool >= 0 && tool.Value != currentTool)
-                    {
-                        inToolchange = true;
-                        toolchangeLinesLeft = options.MmuToolchangeWindowLines;
-                    }
-                    currentTool = tool.Value;
-
-                    if (options.EmitSetActiveSpool
-                        && options.Firmware == FirmwareFlavor.Klipper
-                        && tool.Value >= 0
-                        && tool.Value < options.SpoolmanSpoolIds.Count
-                        && options.SpoolmanSpoolIds[tool.Value].HasValue)
-                    {
-                        output.Add($"SET_ACTIVE_SPOOL ID={options.SpoolmanSpoolIds[tool.Value]!.Value}");
-                    }
-                    continue;
+                    output.Add($"SET_ACTIVE_SPOOL ID={options.SpoolmanSpoolIds[newTool]!.Value}");
                 }
             }
-
-            if (inToolchange)
+            else if (!scan.StrippedLineIndexes.Contains(i))
             {
-                if (!inCpToolchange)
-                {
-                    toolchangeLinesLeft--;
-                    if (toolchangeLinesLeft <= 0)
-                        inToolchange = false;
-                }
+                output.Add(inputLines[i]);
             }
 
-            if (code.StartsWith("G0", StringComparison.OrdinalIgnoreCase) || code.StartsWith("G1", StringComparison.OrdinalIgnoreCase))
+            if (scan.PingsAfterLine.TryGetValue(i, out var pingsHere))
             {
-                if (TryGetParam(code, 'E', out var e))
+                foreach (var ping in pingsHere)
                 {
-                    if (inToolchange && IsEOnlyMove(code))
-                    {
-                        // Strip MMU logistics.
-                        continue;
-                    }
-
-                    var positive = 0.0;
-                    if (!extrusionAbsolute)
-                    {
-                        if (e > 0)
-                            positive = e;
-                    }
-                    else
-                    {
-                        var delta = e - lastAbsoluteE;
-                        if (delta > 0)
-                            positive = delta;
-                        lastAbsoluteE = e;
-                    }
-
-                    if (positive > 0)
-                        totalEffectivePositiveExtrusion += positive;
+                    var mm = ping.EffectiveLocationMm + options.AutoloadingOffsetMm;
+                    output.Add($"; --- P2KLPU - INSERT PING CODE {ping.Index} after {ping.EffectiveLocationMm.ToString("0.0000", CultureInfo.InvariantCulture)}mm of extrusion");
+                    output.Add("M400");
+                    output.Add("G4 S0");
+                    output.Add("O31 " + OmegaEncoding.HexifyFloat(mm));
+                    output.Add("; --- P2KLPU - END PING CODE");
                 }
-            }
-
-            output.Add(raw);
-
-            // Insert ping blocks as soon as we reach the scheduled effective position.
-            while (totalEffectivePositiveExtrusion >= nextPing)
-            {
-                var pingNumber = pingIdx + 1;
-                var mm = nextPing + options.AutoloadingOffsetMm;
-                output.Add($"; --- P2KLPU - INSERT PING CODE {pingNumber} after {nextPing.ToString("0.0000", CultureInfo.InvariantCulture)}mm of extrusion");
-                output.Add("M400");
-                output.Add("G4 S0");
-                output.Add("O31 " + OmegaEncoding.HexifyFloat(mm));
-                output.Add("; --- P2KLPU - END PING CODE");
-
-                pingIdx++;
-                nextPing = pingIdx < scan.Pings.Count ? scan.Pings[pingIdx].EffectiveLocationMm : double.PositiveInfinity;
             }
         }
+
+        AppendSummaryFooter(output, scan, options);
 
         return output;
     }
 
-    private static IReadOnlyList<OmegaAlgorithmEntry> BuildAlgorithmTable(RawMmuScanResult scan, Options options)
+    /// <summary>
+    /// Appends a P2PP-style splice/ping summary as comments so the plan can be inspected after the fact
+    /// (slicer post-processing swallows console output).
+    /// </summary>
+    private static void AppendSummaryFooter(List<string> output, RawMmuScanResult scan, Options options)
     {
-        // Build a per-material transition table similar to Python.
-        var usedTypes = BuildUsedTypes(options.FilamentTypes, scan.ToolsUsed);
-        var table = new Dictionary<(int fromMat, int toMat), OmegaAlgorithmEntry>();
+        output.Add(";");
+        output.Add(";P2KLPU - Splice Information:");
+        output.Add(";----------------------------");
+        output.Add($";  Splice Offset      = {options.SpliceOffsetMm.ToString("0.00", CultureInfo.InvariantCulture)}mm");
+        output.Add($";  Autoloading Offset = {options.AutoloadingOffsetMm.ToString("0.00", CultureInfo.InvariantCulture)}mm");
+        output.Add($";  Extra End Filament = {options.ExtraEndFilamentMm.ToString("0.00", CultureInfo.InvariantCulture)}mm");
 
         foreach (var s in scan.Splices)
         {
-            var fromType = GetTypeForTool(options.FilamentTypes, s.FromTool);
-            var toType = GetTypeForTool(options.FilamentTypes, s.ToTool);
-            var fromMatId = usedTypes.IndexOf(fromType) + 1;
-            var toMatId = usedTypes.IndexOf(toType) + 1;
-            var key = (fromMatId, toMatId);
-
-            var selection = AlgorithmResolver.Resolve(options, s.FromTool + 1, s.ToTool + 1, fromType, toType);
-
-            if (!table.ContainsKey(key))
-            {
-                table[key] = new OmegaAlgorithmEntry(
-                    FromMaterialId: fromMatId,
-                    ToMaterialId: toMatId,
-                    Algorithm: selection.Algorithm,
-                    Reason: selection.Reason);
-            }
+            var min = s.Index == 1 ? options.MinStartSpliceLengthMm : options.MinSpliceLengthMm;
+            var shortMark = min > 0 && s.EffectiveLengthMm < min ? "  << SHORT SPLICE" : "";
+            var to = s.ToTool >= 0 ? (s.ToTool + 1).ToString(CultureInfo.InvariantCulture) : "end";
+            output.Add(
+                $";  #{s.Index:0000} Input {s.FromTool + 1} -> {to}  End {s.EffectiveLocationMm.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(10)}mm  Length {s.EffectiveLengthMm.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(9)}mm{shortMark}");
         }
 
-        return table.Values.OrderBy(v => v.FromMaterialId).ThenBy(v => v.ToMaterialId).ToList();
-    }
-
-    private static string GetTypeForTool(IReadOnlyList<string> filamentTypes, int tool)
-    {
-        if (tool >= 0 && tool < filamentTypes.Count && !string.IsNullOrWhiteSpace(filamentTypes[tool]))
-            return filamentTypes[tool].Trim();
-        return $"UNKNOWN{tool + 1}";
-    }
-
-    private static List<string> BuildUsedTypes(IReadOnlyList<string> filamentTypes, IReadOnlyList<int> toolsUsed)
-    {
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var t in toolsUsed)
-            set.Add(GetTypeForTool(filamentTypes, t));
-        var list = set.ToList();
-        list.Sort(StringComparer.OrdinalIgnoreCase);
-        return list;
-    }
-
-    private static bool IsEOnlyMove(string line)
-    {
-        return HasParam(line, 'E') && !HasParam(line, 'X') && !HasParam(line, 'Y') && !HasParam(line, 'Z');
-    }
-
-    private static bool HasParam(string gcode, char param)
-    {
-        var tokens = gcode.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (var t in tokens)
+        output.Add(";");
+        output.Add(";P2KLPU - Ping Information:");
+        output.Add(";--------------------------");
+        foreach (var p in scan.Pings)
         {
-            if (t.Length < 2) continue;
-            if (char.ToUpperInvariant(t[0]) == char.ToUpperInvariant(param))
-                return true;
+            output.Add($";  Ping {p.Index:0000} at {p.EffectiveLocationMm.ToString("0.00", CultureInfo.InvariantCulture)}mm");
         }
-        return false;
-    }
-
-    private static string StripComment(string line)
-    {
-        var idx = line.IndexOf(';');
-        return idx >= 0 ? line[..idx].Trim() : line.Trim();
-    }
-
-    private static bool TryGetParam(string gcode, char param, out double value)
-    {
-        value = 0;
-        var tokens = gcode.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (var t in tokens)
-        {
-            if (t.Length < 2) continue;
-            if (char.ToUpperInvariant(t[0]) != char.ToUpperInvariant(param)) continue;
-            var num = t[1..];
-            if (double.TryParse(num, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed))
-            {
-                value = parsed;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static bool TryParseToolChange(string line, out int tool)
-    {
-        tool = -1;
-        line = line.Trim();
-        if (line.Length < 2) return false;
-        if (line[0] is not 'T' and not 't') return false;
-
-        var n = line[1..].Trim();
-        if (n.Length == 0) return false;
-        var end = n.IndexOf(' ');
-        if (end >= 0) n = n[..end];
-        if (int.TryParse(n, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed >= 0)
-        {
-            tool = parsed;
-            return true;
-        }
-        return false;
-    }
-
-    private static int? TryParseKlipperActivateExtruder(string line)
-    {
-        var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        foreach (var p in parts)
-        {
-            if (!p.StartsWith("EXTRUDER=", StringComparison.OrdinalIgnoreCase))
-                continue;
-            var v = p[9..];
-            if (v.Equals("extruder", StringComparison.OrdinalIgnoreCase))
-                return 0;
-            if (v.StartsWith("extruder", StringComparison.OrdinalIgnoreCase))
-            {
-                var suffix = v[8..];
-                if (int.TryParse(suffix, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n >= 0)
-                    return n;
-            }
-        }
-        return null;
     }
 }

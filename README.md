@@ -12,14 +12,19 @@
 #### D) In Printer => Custom GCode => Start GCode you add options below listed, for example my personal options are:
 ```
 ;P2KLPU PRINTERPROFILE=e666315ff39d9c78
-; Printer Profile is random number you create, which represents your printer, I will in the future implement way to calculate this hash out of your printer name in slicer
+; Printer Profile is random number you create, which represents your printer. If you omit this directive entirely, P2KLPU derives a stable profile hash from your PrusaSlicer printer profile name (printer_settings_id), so the same printer always gets the same ID automatically.
 ;P2KLPU SPLICEOFFSET=38
 ; Splice offset is offset of your mixing hotend part, if you have short hotend, you can have low offset (Almost 0), if you have long hotend, it can be up to 60. I have Dragon Water Cooled, with longer offset, 38mm works for me
 ; If your splices come too soon, make offset larger, if they come too late, make it smaller. Start at 25 and see. Depending on your tube length, one layer of large rectangle with 4 colors can be enough to do this.
 ;P2KLPU MINSTARTSPLICE=100
 ; This is just checking for your first splice, so it has at least 100mm, Palette 2S manual states so 85 is minimum, but I found 100mm as safe where filament does not break (It has tension from moving around Palete)
+; Your value is honored as-is (no silent clamping); values below the manual minimum (85mm) produce a warning.
 ;P2KLPU MINSPLICE=70
 ; This is just checking for every remaining splice, so it is not shorter. If splice is too short, sometimes they can break inside Palette, Palette 2S Manual states 60mm minimum, I found 70 mm safe.
+; Your value is honored as-is; values below the manual minimum (60mm) produce a warning.
+; A splice below the configured minimum is an ERROR: by default (STRICT=1) the export fails so PrusaSlicer
+; shows you the problem instead of silently producing a file with splices that can break inside the Palette.
+; Add ;P2KLPU STRICT=0 to downgrade errors to warnings and write the output anyway.
 
 ;P2KLPU EXTRAENDFILAMENT=150
 ; This is how much extra filament there is at the end, if you have like me hotend/extruder path 100 mm, its nice to have 50mm above to grip the filament and pull it out
@@ -550,7 +555,8 @@ Directives are case-insensitive and can appear anywhere in the file.
 
 General:
 - `;P2KLPU RAW_MMU=0|1`
-- `;P2KLPU PRINTERPROFILE=<hex>` (Palette2 printer profile ID)
+- `;P2KLPU STRICT=0|1` (default 1: error-level findings — short splices, absolute E in RAW_MMU, MMU priming enabled — fail the export with a non-zero exit code so PrusaSlicer shows them; set 0 to write output anyway)
+- `;P2KLPU PRINTERPROFILE=<hex>` (Palette2 printer profile ID; omit to auto-derive a stable ID from the slicer printer profile name)
 - `;P2KLPU AUTOLOADINGOFFSET=<mm>` (see note below)
 - `;P2KLPU FILAMENTOVERRIDE_DI<n>=<name>` (overrides PrusaSlicer `filament_type[n-1]` for MATERIAL matching)
 - `;P2KLPU FILAMENTOVERRIDE=<name>` (alias for `FILAMENTOVERRIDE_DI1`)
@@ -577,11 +583,22 @@ About `AUTOLOADINGOFFSET`:
 - The processor uses this offset to shift Omega distances (notably `O30` splice positions, `O31` ping positions, and the total in `O1`) by the specified millimeters.
 
 About `MINSTARTSPLICE` / `MINSPLICE`:
-- These set minimum splice-length thresholds used for analysis warnings.
-- When a computed splice length is below the configured minimum, the tool reports a warning in console output.
+- These set minimum splice-length thresholds.
+- Your values are honored exactly (no silent clamping); values below the Palette 2 manual minimums (85mm first / 60mm rest) additionally produce a warning.
+- A computed splice below the minimum is an ERROR: with `STRICT=1` (default) the export fails so the slicer surfaces it; with `STRICT=0` it is reported and the output is still written.
+- The check covers every splice including the final end-of-print splice.
 
 About `EXTRAENDFILAMENT`:
-- This adds extra “tail” filament to the Omega `O1` total length so there is additional filament available after printing finishes.
+- This adds extra “tail” filament to the final end-of-print splice (and therefore the Omega `O1` total length) so there is additional filament available after printing finishes.
+
+About the splice schedule (important):
+- The splice list always ends with a final end-of-print splice covering the last tool's segment through the end of the print plus `EXTRAENDFILAMENT`. Without it the Palette would never schedule production of the last color segment. The `O1` total equals the end of that final splice, matching what the Palette expects.
+- Extrusion is accounted NET (retracts subtract, unretracts add back), matching what the Palette's encoder physically sees — so ping feedback percentages stay close to 100%.
+- Arc moves (`G2`/`G3`) are fully supported in the accounting, so PrusaSlicer “Arc fitting” can stay enabled.
+- A P2PP-style splice/ping summary is appended to the output G-code as comments, so you can inspect the plan after the fact even though PrusaSlicer hides console output.
+
+About algorithm overrides and material IDs:
+- The Palette 2 selects splice parameters from the `O32` table keyed by MATERIAL-ID pairs (from `O25`), not per splice. When you use input-pair overrides (`MATERIAL_DI1_DI2_...` / `MATERIAL_IN1_IN3_...` / `ALGO 1-2=...`), P2KLPU assigns each used input its OWN material ID so those per-input algorithms genuinely reach the device (with only material-name overrides, inputs sharing a material share an ID, exactly like P2PP).
 
 Ping planning:
 - `;P2KLPU PING_INTERVAL=<mm>`
@@ -590,7 +607,7 @@ Ping planning:
 
 RAW_MMU toolchange stripping heuristics:
 - `;P2KLPU MMU_TOOLCHANGE_WINDOW_LINES=<int>`
-- `;P2KLPU MMU_E_ONLY_STRIP_THRESHOLD=<mm>`
+- `;P2KLPU MMU_E_ONLY_STRIP_THRESHOLD=<mm>` (default 15: E-only moves inside a toolchange region are stripped only when their magnitude is at least this many mm — big unload/load/ram moves go away, small retract/unretract pairs survive so the toolchange wipe still controls ooze; set 0 to strip every in-window E-only move)
 
 Algorithm selection:
 - `;P2KLPU DEFAULT_ALGO=h,c,k`

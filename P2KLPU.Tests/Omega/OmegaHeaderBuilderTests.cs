@@ -12,7 +12,7 @@ public sealed class OmegaHeaderBuilderTests
             PrinterProfileHex: "50325050494e464f",
             AutoloadingOffsetMm: 0,
             ExtraEndFilamentMm: 0,
-            TotalEffectivePositiveExtrusionMm: 10,
+            TotalEffectiveExtrusionMm: 10,
             FilamentTypes: new[] { "PETG", "PLA" },
             FilamentColorsHex: new[] { "ff0000", "00ff00" },
             ToolsUsed: new[] { 0, 1 },
@@ -28,7 +28,7 @@ public sealed class OmegaHeaderBuilderTests
         Assert.Contains("O27 D0001", header);
         Assert.Contains("O30 D0 D40a00000", header); // 5.0f => 0x40a00000
         Assert.Contains("O32 D12 D0003 Dffff Dfffa", header);
-        Assert.Contains("O1 Dmy_print D00000005", header); // last splice location 5mm
+        Assert.Contains("O1 Dmy_print D00000005", header); // O1 total = end of the last splice
     }
 
     [Fact]
@@ -39,7 +39,7 @@ public sealed class OmegaHeaderBuilderTests
             PrinterProfileHex: "50325050494e464f",
             AutoloadingOffsetMm: 0,
             ExtraEndFilamentMm: 150,
-            TotalEffectivePositiveExtrusionMm: 10,
+            TotalEffectiveExtrusionMm: 10,
             FilamentTypes: Array.Empty<string>(),
             FilamentColorsHex: Array.Empty<string>(),
             ToolsUsed: Array.Empty<int>(),
@@ -61,7 +61,7 @@ public sealed class OmegaHeaderBuilderTests
             PrinterProfileHex: "50325050494e464f",
             AutoloadingOffsetMm: 0,
             ExtraEndFilamentMm: 0,
-            TotalEffectivePositiveExtrusionMm: 10,
+            TotalEffectiveExtrusionMm: 10,
             FilamentTypes: new[] { "PETG", "PLA" },
             FilamentColorsHex: new[] { "ff0000", "00ff00" },
             ToolsUsed: new[] { 0, 1 },

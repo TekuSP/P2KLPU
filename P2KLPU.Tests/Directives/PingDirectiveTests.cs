@@ -41,8 +41,10 @@ public sealed class PingDirectiveTests
     }
 
     [Fact]
-    public void ApplyTo_LinearPingLength_ClampsToMinimum100mm()
+    public void ApplyTo_LinearPingLength_HonorsSmallValues_WithoutClamping()
     {
+        // The user's value is honored as-is; the analyzer warns about very small intervals
+        // instead of silently clamping (the README documents the real manual minimums).
         var lines = new[]
         {
             ";P2KLPU LINEARPINGLENGTH=50",
@@ -53,7 +55,7 @@ public sealed class PingDirectiveTests
 
         var updated = new DirectiveParseResult(true, -1, -1, directives).ApplyTo(options);
 
-        Assert.Equal(100.0, updated.PingInitialIntervalMm);
+        Assert.Equal(50.0, updated.PingInitialIntervalMm);
         Assert.Equal(3000, updated.PingMaxIntervalMm);
         Assert.Equal(1.0, updated.PingLengthMultiplier);
     }

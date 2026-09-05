@@ -9,23 +9,24 @@ using System.Linq;
 /// <remarks>
 /// In RAW_MMU mode, this delegates effective extrusion accounting and tower detection to
 /// <see cref="RawMmuScanner"/> so analysis matches the rewrite pipeline.
+///
+/// Findings are split into <see cref="GcodeAnalysis.Errors"/> (conditions that make the output unsafe
+/// to print — short splices, absolute extrusion in RAW_MMU, MMU priming) and
+/// <see cref="GcodeAnalysis.Warnings"/> (advisory). In strict mode the CLI fails the export on errors.
 /// </remarks>
 /// <seealso cref="GcodeAnalysis"/>
 static class GcodeAnalyzer
 {
     /// <summary>
-    /// Analyzes the provided G-code lines and computes splices/pings plus diagnostic warnings.
+    /// Analyzes the provided G-code lines and computes splices/pings plus diagnostic warnings and errors.
     /// </summary>
-    /// <remarks>
-    /// In RAW_MMU mode, this uses <see cref="RawMmuScanner"/> so analysis matches the rewrite pipeline's
-    /// effective extrusion accounting.
-    /// </remarks>
     /// <param name="lines">Input G-code lines.</param>
     /// <param name="options">Processing options affecting parsing and algorithm selection.</param>
     /// <returns>A computed <see cref="GcodeAnalysis"/> summary.</returns>
     public static GcodeAnalysis Analyze(string[] lines, Options options)
     {
         var warnings = new List<string>();
+        var errors = new List<string>();
 
         var filamentColors = SlicerConfigDetector.TryReadFilamentColors(lines);
         IReadOnlyList<string> colorsForInputs;
@@ -42,6 +43,8 @@ static class GcodeAnalyzer
             colorsForInputs = extruderColors.Count > 0 ? extruderColors : filamentColors;
         }
 
+        AddThresholdAdvisories(options, warnings);
+
         var pings = new List<PingEvent>();
 
         var sawTToolchange = false;
@@ -56,6 +59,20 @@ static class GcodeAnalyzer
             foreach (var s in scan.Splices)
             {
                 var fromInput = s.FromTool + 1;
+
+                if (s.ToTool < 0)
+                {
+                    // Final end-of-print splice: no destination tool, no transition algorithm.
+                    splices.Add(new SpliceEvent(
+                        Index: s.Index,
+                        FromInput: fromInput,
+                        ToInput: 0,
+                        LocationMm: s.EffectiveLocationMm,
+                        LengthMm: s.EffectiveLengthMm,
+                        Algorithm: default));
+                    continue;
+                }
+
                 var toInput = s.ToTool + 1;
                 var fromMaterial = GetMaterial(options, fromInput);
                 var toMaterial = GetMaterial(options, toInput);
@@ -81,19 +98,24 @@ static class GcodeAnalyzer
                 warnings.Add($"No algorithm override matched for material transition '{kv.Key.From}' -> '{kv.Key.To}' ({kv.Value} splice(s)); using default algorithm {options.DefaultAlgorithm}.");
             }
 
+            // The device-side O32 table can carry fewer distinctions than per-splice resolution;
+            // surface conflicts so users know which algorithm actually reaches the Palette.
+            var tableResult = OmegaAlgorithmTableBuilder.Build(scan, options);
+            warnings.AddRange(tableResult.Warnings);
+
             foreach (var s in splices)
             {
                 var min = s.Index == 1 ? options.MinStartSpliceLengthMm : options.MinSpliceLengthMm;
                 if (min > 0 && s.LengthMm < min)
                 {
-                    warnings.Add($"Short splice detected: splice #{s.Index} length {s.LengthMm:0.00}mm < min {min:0.00}mm");
+                    errors.Add($"Short splice: splice #{s.Index} length {s.LengthMm:0.00}mm < min {min:0.00}mm. Increase transition purge, SPLICEOFFSET, or combine colors.");
                 }
             }
 
             var inputUsage = BuildInputUsageSummary(
                 splices,
-                endLocationMm: scan.TotalEffectivePositiveExtrusionMm + options.SpliceOffsetMm,
-                endInput: scan.Splices.Count > 0 ? (scan.Splices[^1].ToTool + 1) : (scan.ToolsUsed.Count > 0 ? (scan.ToolsUsed[^1] + 1) : (int?)null),
+                endLocationMm: scan.TotalEffectiveExtrusionMm + options.SpliceOffsetMm,
+                endInput: null, // the final splice already covers the tail segment
                 colorsForInputs,
                 options);
 
@@ -121,7 +143,9 @@ static class GcodeAnalyzer
             }
 
             if (scan.ExtrusionIsAbsolute)
-                warnings.Add("Detected absolute extrusion (M82). RAW_MMU mode approximates effective extrusion using deltas.");
+                errors.Add("Absolute extrusion (M82) detected. RAW_MMU rewriting strips E-only moves and is only safe with relative extrusion — enable 'Use relative E distances' (M83) in the printer profile.");
+
+            AddPrusaSetupFindings(lines, options, scan.SawAnyToolchange, warnings, errors);
 
             if (scan.TowerDetection == TowerDetectionMethod.None)
             {
@@ -132,18 +156,32 @@ static class GcodeAnalyzer
                 warnings.Add("No PrusaSlicer ;TYPE markers detected; tower/model breakdown inferred from toolchange blocks/windows (best-effort).");
             }
 
+            if (scan.SawExplicitToolchangeBlocks)
+            {
+                warnings.Add($"Toolchange handling: explicit TOOLCHANGE START/END blocks detected; E-only moves of at least {options.MmuEOnlyStripThresholdMm:0.##}mm inside those blocks are excluded from effective extrusion.");
+            }
+            else if (scan.UsedHeuristicToolchangeWindows)
+            {
+                warnings.Add($"Toolchange handling: heuristic line-window used (MMU_TOOLCHANGE_WINDOW_LINES={options.MmuToolchangeWindowLines}); E-only moves of at least {options.MmuEOnlyStripThresholdMm:0.##}mm inside that window are excluded from effective extrusion.");
+            }
+            else if (scan.SawAnyToolchange)
+            {
+                warnings.Add("Toolchange handling: no toolchange blocks/windows detected; only Tn/ACTIVATE_EXTRUDER commands define splice points.");
+            }
+
             return new GcodeAnalysis(
                 ExtrusionIsAbsolute: scan.ExtrusionIsAbsolute,
                 TotalPositiveExtrusionMm: scan.TotalPositiveExtrusionMm,
-                TotalEffectivePositiveExtrusionMm: scan.TotalEffectivePositiveExtrusionMm,
-                TowerEffectivePositiveExtrusionMm: scan.TowerEffectivePositiveExtrusionMm,
-                ModelEffectivePositiveExtrusionMm: scan.ModelEffectivePositiveExtrusionMm,
+                TotalEffectiveExtrusionMm: scan.TotalEffectiveExtrusionMm,
+                TowerEffectiveExtrusionMm: scan.TowerEffectiveExtrusionMm,
+                ModelEffectiveExtrusionMm: scan.ModelEffectiveExtrusionMm,
                 IgnoredToolchangeEOnlyPositiveExtrusionMm: scan.IgnoredToolchangeEOnlyPositiveExtrusionMm,
                 TowerBounds: scan.TowerBounds,
                 Splices: splices,
                 InputUsage: inputUsage,
                 Pings: pings,
-                Warnings: warnings);
+                Warnings: warnings,
+                Errors: errors);
         }
 
         var extrusionAbsolute = false;
@@ -152,6 +190,7 @@ static class GcodeAnalyzer
         var currentTool = -1; // 0-based tool index
         var previousSpliceLocation = 0.0;
         var totalPositiveExtrusion = 0.0;
+        var totalNetExtrusion = 0.0;
         var spliceIndex = 0;
         var splicesNonRaw = new List<SpliceEvent>();
 
@@ -189,7 +228,7 @@ static class GcodeAnalyzer
                 if (currentTool >= 0 && newTool != currentTool)
                 {
                     // Connected-mode scheduling: splice at (total_material_extruded + splice_offset)
-                    var location = totalPositiveExtrusion + options.SpliceOffsetMm;
+                    var location = totalNetExtrusion + options.SpliceOffsetMm;
                     var length = location - previousSpliceLocation;
                     previousSpliceLocation = location;
 
@@ -229,7 +268,7 @@ static class GcodeAnalyzer
                     var newTool2 = tool.Value;
                     if (currentTool >= 0 && newTool2 != currentTool)
                     {
-                        var location = totalPositiveExtrusion + options.SpliceOffsetMm;
+                        var location = totalNetExtrusion + options.SpliceOffsetMm;
                         var length = location - previousSpliceLocation;
                         previousSpliceLocation = location;
                         var fromInput = currentTool + 1;
@@ -258,24 +297,24 @@ static class GcodeAnalyzer
                 continue;
             }
 
-            if (line.StartsWith("G1", StringComparison.OrdinalIgnoreCase) || line.StartsWith("G0", StringComparison.OrdinalIgnoreCase))
+            if (IsExtrusionMoveCommand(line))
             {
                 if (TryGetParam(line, 'E', out var e))
                 {
+                    double delta;
                     if (!extrusionAbsolute)
                     {
-                        // Relative extrusion: sum only positive extrusion.
-                        if (e > 0)
-                            totalPositiveExtrusion += e;
+                        delta = e;
                     }
                     else
                     {
-                        // Absolute extrusion: add positive deltas only.
-                        var delta = e - lastAbsoluteE;
-                        if (delta > 0)
-                            totalPositiveExtrusion += delta;
+                        delta = e - lastAbsoluteE;
                         lastAbsoluteE = e;
                     }
+
+                    totalNetExtrusion += delta;
+                    if (delta > 0)
+                        totalPositiveExtrusion += delta;
                 }
             }
 
@@ -288,12 +327,7 @@ static class GcodeAnalyzer
             }
         }
 
-        if (!extrusionAbsolute)
-        {
-            // Matches Python warning: P2PP expects relative extrusion.
-            // Here we only warn if we never saw M82/M83 (unknown) OR if absolute detected.
-        }
-        else
+        if (extrusionAbsolute)
         {
             warnings.Add("Detected absolute extrusion (M82). P2PP historically expects relative extrusion (M83). This tool will approximate using deltas.");
         }
@@ -324,7 +358,7 @@ static class GcodeAnalyzer
 
         var inputUsageNonRaw = BuildInputUsageSummary(
             splicesNonRaw,
-            endLocationMm: totalPositiveExtrusion + options.SpliceOffsetMm,
+            endLocationMm: totalNetExtrusion + options.SpliceOffsetMm,
             endInput: currentTool >= 0 ? (currentTool + 1) : (int?)null,
             colorsForInputs,
             options);
@@ -332,15 +366,60 @@ static class GcodeAnalyzer
         return new GcodeAnalysis(
             ExtrusionIsAbsolute: extrusionAbsolute,
             TotalPositiveExtrusionMm: totalPositiveExtrusion,
-            TotalEffectivePositiveExtrusionMm: null,
-            TowerEffectivePositiveExtrusionMm: null,
-            ModelEffectivePositiveExtrusionMm: null,
+            TotalEffectiveExtrusionMm: null,
+            TowerEffectiveExtrusionMm: null,
+            ModelEffectiveExtrusionMm: null,
             IgnoredToolchangeEOnlyPositiveExtrusionMm: null,
             TowerBounds: null,
             Splices: splicesNonRaw,
             InputUsage: inputUsageNonRaw,
             Pings: pings,
-            Warnings: warnings);
+            Warnings: warnings,
+            Errors: errors);
+    }
+
+    /// <summary>
+    /// Advisory checks for user-set thresholds that are below Palette 2 manual recommendations.
+    /// </summary>
+    private static void AddThresholdAdvisories(Options options, List<string> warnings)
+    {
+        if (options.MinStartSpliceLengthMm > 0 && options.MinStartSpliceLengthMm < 85)
+            warnings.Add($"MINSTARTSPLICE={options.MinStartSpliceLengthMm:0.##}mm is below the Palette 2 manual minimum of 85mm for the first splice.");
+        if (options.MinSpliceLengthMm > 0 && options.MinSpliceLengthMm < 60)
+            warnings.Add($"MINSPLICE={options.MinSpliceLengthMm:0.##}mm is below the Palette 2 manual minimum of 60mm.");
+        if (options.PingInitialIntervalMm < 100)
+            warnings.Add($"Ping interval {options.PingInitialIntervalMm:0.##}mm is very small; pings that close together can destabilize Palette compensation.");
+    }
+
+    /// <summary>
+    /// PrusaSlicer profile sanity checks that commonly break Palette connected-mode prints.
+    /// </summary>
+    private static void AddPrusaSetupFindings(string[] lines, Options options, bool sawAnyToolchange, List<string> warnings, List<string> errors)
+    {
+        if (SlicerConfigDetector.TryReadPrusaInt(lines, "single_extruder_multi_material_priming") == 1)
+        {
+            errors.Add("PrusaSlicer 'single_extruder_multi_material_priming' is enabled. Start-of-print priming cycles all tools and creates a burst of impossibly short splices — disable it (Print Settings -> Multiple Extruders).");
+        }
+
+        if (SlicerConfigDetector.TryReadPrusaInt(lines, "use_relative_e_distances") == 0)
+        {
+            errors.Add("PrusaSlicer 'use_relative_e_distances' is disabled (absolute E). RAW_MMU processing requires relative E distances — enable it in the printer profile.");
+        }
+
+        if (sawAnyToolchange && SlicerConfigDetector.TryReadPrusaInt(lines, "wipe_tower") == 0)
+        {
+            warnings.Add("PrusaSlicer wipe tower is disabled but the print has toolchanges. Transitions will purge into the model — enable the wipe tower for clean color changes.");
+        }
+
+        var diameters = SlicerConfigDetector.TryReadFilamentDiameters(lines);
+        if (diameters.Count > 0)
+        {
+            var distinct = diameters.Where(d => d > 0).Distinct().ToList();
+            if (distinct.Count > 1)
+                warnings.Add($"filament_diameter differs across tools ({string.Join(", ", distinct.Select(d => d.ToString("0.###", CultureInfo.InvariantCulture)))}); the Palette requires uniform filament diameter.");
+            else if (distinct.Count == 1 && Math.Abs(distinct[0] - 1.75) > 0.05)
+                warnings.Add($"filament_diameter = {distinct[0].ToString("0.###", CultureInfo.InvariantCulture)}mm; the Palette 2 expects 1.75mm filament.");
+        }
     }
 
     private static List<InputUsageSummary> BuildInputUsageSummary(
@@ -368,6 +447,7 @@ static class GcodeAnalyzer
         }
 
         // Add tail segment from the last splice to the end of the file.
+        // (RAW_MMU passes endInput = null because the final splice already covers the tail.)
         if (endInput.HasValue)
         {
             var lastLoc = splices[^1].LocationMm;
@@ -383,7 +463,8 @@ static class GcodeAnalyzer
         }
 
         // Ensure inputs that only appear as ToInput also show up (with 0 segment count/min/max).
-        foreach (var to in splices.Select(s => s.ToInput).Distinct())
+        // ToInput 0 marks the final end-of-print splice, not a real input.
+        foreach (var to in splices.Select(s => s.ToInput).Where(t => t >= 1).Distinct())
         {
             if (!usageByInput.ContainsKey(to))
                 usageByInput[to] = (0, 0, null, null);
@@ -416,6 +497,24 @@ static class GcodeAnalyzer
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Matches linear (G0/G1) and arc (G2/G3) moves by exact first token, so probe/home style
+    /// commands like G28/G29/G32 or firmware retract G10/G11 are never mistaken for moves.
+    /// </summary>
+    private static bool IsExtrusionMoveCommand(string code)
+    {
+        if (code.Length < 2)
+            return false;
+        if (code[0] is not ('G' or 'g'))
+            return false;
+
+        var end = 1;
+        while (end < code.Length && code[end] != ' ')
+            end++;
+
+        return code[1..end] is "0" or "00" or "1" or "01" or "2" or "02" or "3" or "03";
     }
 
     private static bool TryParseO31PingMm(string line, out double mm)

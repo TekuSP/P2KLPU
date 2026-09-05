@@ -17,16 +17,22 @@ using System.Text;
 sealed record GcodeAnalysis(
     bool ExtrusionIsAbsolute,
     double TotalPositiveExtrusionMm,
-    double? TotalEffectivePositiveExtrusionMm,
-    double? TowerEffectivePositiveExtrusionMm,
-    double? ModelEffectivePositiveExtrusionMm,
+    double? TotalEffectiveExtrusionMm,
+    double? TowerEffectiveExtrusionMm,
+    double? ModelEffectiveExtrusionMm,
     double? IgnoredToolchangeEOnlyPositiveExtrusionMm,
     AxisAlignedBounds2D? TowerBounds,
     IReadOnlyList<SpliceEvent> Splices,
     IReadOnlyList<InputUsageSummary> InputUsage,
     IReadOnlyList<PingEvent> Pings,
-    IReadOnlyList<string> Warnings)
+    IReadOnlyList<string> Warnings,
+    IReadOnlyList<string> Errors)
 {
+    /// <summary>
+    /// True when any error-level finding exists (conditions that make the output unsafe to print).
+    /// </summary>
+    public bool HasErrors => Errors.Count > 0;
+
     /// <summary>
     /// Formats this analysis as a console-friendly multi-line report.
     /// </summary>
@@ -55,23 +61,23 @@ sealed record GcodeAnalysis(
         sb.AppendLine($"Extrusion mode: {(ExtrusionIsAbsolute ? "Absolute (M82)" : "Relative (M83)")}");
         sb.AppendLine($"Total positive extrusion: {TotalPositiveExtrusionMm:0.###} mm");
 
-        if (TotalEffectivePositiveExtrusionMm.HasValue)
+        if (TotalEffectiveExtrusionMm.HasValue)
         {
-            sb.AppendLine($"RAW_MMU effective positive extrusion: {TotalEffectivePositiveExtrusionMm.Value:0.###} mm");
+            sb.AppendLine($"RAW_MMU effective extrusion (net): {TotalEffectiveExtrusionMm.Value:0.###} mm");
             if (IgnoredToolchangeEOnlyPositiveExtrusionMm.HasValue && IgnoredToolchangeEOnlyPositiveExtrusionMm.Value > 0)
                 sb.AppendLine($"Ignored toolchange E-only positive extrusion: {IgnoredToolchangeEOnlyPositiveExtrusionMm.Value:0.###} mm");
 
-            if (TowerEffectivePositiveExtrusionMm.HasValue && ModelEffectivePositiveExtrusionMm.HasValue)
+            if (TowerEffectiveExtrusionMm.HasValue && ModelEffectiveExtrusionMm.HasValue)
             {
-                sb.AppendLine($"Tower effective extrusion: {TowerEffectivePositiveExtrusionMm.Value:0.###} mm");
-                sb.AppendLine($"Model effective extrusion: {ModelEffectivePositiveExtrusionMm.Value:0.###} mm");
+                sb.AppendLine($"Tower effective extrusion: {TowerEffectiveExtrusionMm.Value:0.###} mm");
+                sb.AppendLine($"Model effective extrusion: {ModelEffectiveExtrusionMm.Value:0.###} mm");
                 if (TowerBounds.HasValue)
                     sb.AppendLine($"Tower XY bounds (from ;TYPE markers): {TowerBounds.Value}");
             }
         }
 
         sb.AppendLine($"Splices detected: {Splices.Count}");
-        sb.AppendLine($"Palette pings (O31) {(TotalEffectivePositiveExtrusionMm.HasValue ? "planned" : "detected")}: {Pings.Count}");
+        sb.AppendLine($"Palette pings (O31) {(TotalEffectiveExtrusionMm.HasValue ? "planned" : "detected")}: {Pings.Count}");
         if (Pings.Count > 0)
         {
             sb.AppendLine("O31 encodes a ping location along the extruded filament.");
@@ -121,6 +127,15 @@ sealed record GcodeAnalysis(
         }
         sb.AppendLine();
 
+        if (Errors.Count > 0)
+        {
+            const string FgRed = "\u001b[31m";
+            sb.AppendLine(C("Errors:", Bold + FgRed, useColor));
+            foreach (var e in Errors)
+                sb.AppendLine(C($"  - {e}", FgRed, useColor));
+            sb.AppendLine();
+        }
+
         if (Warnings.Count > 0)
         {
             sb.AppendLine(C("Warnings:", Bold + FgYellow, useColor));
@@ -136,8 +151,11 @@ sealed record GcodeAnalysis(
             const string locationHeader = "Location(mm)";
             const string lengthHeader = "Length(mm)";
 
+            static string RenderToInput(int toInput)
+                => toInput >= 1 ? toInput.ToString(CultureInfo.InvariantCulture) : "end";
+
             var indexWidth = Math.Max(indexHeader.Length, Splices.Max(s => s.Index).ToString(CultureInfo.InvariantCulture).Length);
-            var inputWidth = Math.Max(1, Splices.Max(s => Math.Max(s.FromInput, s.ToInput)).ToString(CultureInfo.InvariantCulture).Length);
+            var inputWidth = Math.Max(1, Splices.Max(s => Math.Max(s.FromInput.ToString(CultureInfo.InvariantCulture).Length, RenderToInput(s.ToInput).Length)));
             var fromToWidth = Math.Max(fromToHeader.Length, (inputWidth * 2) + 2); // "<from>-><to>"
             var maxLocationText = Splices
                 .Select(s => s.LocationMm.ToString("0.00", CultureInfo.InvariantCulture))
@@ -167,7 +185,7 @@ sealed record GcodeAnalysis(
                 var idx = s.Index.ToString(CultureInfo.InvariantCulture).PadLeft(indexWidth);
                 var fromTo = s.FromInput.ToString(CultureInfo.InvariantCulture).PadLeft(inputWidth)
                     + "->"
-                    + s.ToInput.ToString(CultureInfo.InvariantCulture).PadRight(inputWidth);
+                    + RenderToInput(s.ToInput).PadRight(inputWidth);
                 var fromToCol = fromTo.PadRight(fromToWidth);
                 var location = s.LocationMm.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(locationWidth);
                 var length = s.LengthMm.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(lengthWidth);
