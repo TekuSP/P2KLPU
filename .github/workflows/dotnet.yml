@@ -123,19 +123,19 @@ jobs:
           Get-ChildItem -Path $publishDir -Recurse -Directory | Where-Object { $_.Name.EndsWith('.dSYM', [System.StringComparison]::OrdinalIgnoreCase) } | Remove-Item -Recurse -Force
 
       - name: Upload symbols
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
           name: Symbols - v${{ env.VERSION_PREFIX }}.${{ github.run_number }} - ${{ matrix.os }} - ${{ matrix.platform }}
           path: ./Symbols/${{ matrix.os }}/${{ matrix.platform }}
       - name: Upload dotnet test results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
           name: Unit Test Results - v${{ env.VERSION_PREFIX }}.${{ github.run_number }} - ${{ matrix.os }} - ${{ matrix.platform }}
           path: TestResults-${{ matrix.os }}-${{ matrix.platform }}
       - name: Upload build
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: ${{ always() }}
         continue-on-error: true
         with:
