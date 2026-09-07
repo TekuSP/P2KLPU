@@ -36,4 +36,8 @@ sealed record RawMmuScanResult(
     IReadOnlyList<RawMmuPing> Pings,
     IReadOnlyCollection<int> StrippedLineIndexes,
     IReadOnlyDictionary<int, int> ToolchangeCommandLines,
-    IReadOnlyDictionary<int, IReadOnlyList<RawMmuPing>> PingsAfterLine);
+    IReadOnlyDictionary<int, IReadOnlyList<RawMmuPing>> PingsAfterLine,
+    IReadOnlyList<LayerInfo> Layers,
+    IReadOnlyList<ToolchangeContext> ToolchangeContexts,
+    AxisAlignedBounds2D? ModelBounds,
+    double InjectedEffectiveEMm);

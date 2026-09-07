@@ -549,6 +549,56 @@ Firmware flavor:
 	- If the file is marked as `klipper`, the POC enables Klipper-specific pause/sync fixes.
 	- If the file is marked as a Marlin flavor, the POC is pass-through by default (no `G4` or `M0/M1` rewrites), but explicit ping-block overrides (e.g. `;P2KLPU SYNC_PING_MACRO_OVERRIDE=...`, `;P2KLPU PING_MACRO_BEFORE=...`, `;P2KLPU PING_MACRO_AFTER=...`) are still honored.
 
+## Custom purge tower (TOWER mode)
+
+P2KLPU can generate its OWN purge tower and ignore PrusaSlicer's entirely. In this mode PrusaSlicer only decides *when* toolchanges happen; P2KLPU owns all purge — which makes minimum splice lengths guaranteed **by construction** (each transition's purge is sized as `max(pair purge, MINSPLICE deficit)`).
+
+Setup:
+1. In PrusaSlicer, **disable the wipe tower** (Print Settings → Multiple extruders → Wipe tower OFF). TOWER mode errors if it's left on (you'd get two towers).
+2. Enable **Label objects** (Output options) — recommended, so the tower can be auto-placed near your objects using their real outlines.
+3. Add `;P2KLPU TOWER=1` to your start G-code directives.
+
+How the tower behaves:
+- Grows **layer-synchronized with the print** (PrusaSlicer-style): every layer up to the last toolchange's layer gets a tower pass — "sustaining" layers (walls + a sparse support lattice) on layers without a toolchange (mostly empty), perimeter + zigzag fill consumed up to the purge target on layers with one (full if needed). Fill orientation alternates 90° per layer for anchoring.
+- **No mid-air bridging**: sustaining layers carry a sparse internal lattice (`TOWER_SUSTAIN_SPACING`, default 6mm; 0 = walls only) using the same orientation parity as the dense fill — so a purge layer's fill always finds perpendicular support lines one layer below and bridges at most one lattice gap, never the whole footprint.
+- **First layer is printed full** (dense fill) **with a brim** around it (`TOWER_BRIM_LOOPS`, default 4) for adhesion.
+- The **color change happens ON the tower**: the purge visit replaces the toolchange immediately, and every purge is floored at `SPLICEOFFSET + 15mm`, so the splice junction (where the blend arrives, per your SPLICEOFFSET calibration) always lands inside the tower purge with margin after it.
+- Footprint is **auto-sized and auto-shaped** from the worst layer's purge demand: a square is preferred, but when it doesn't fit the free bed space the planner tries rectangles (1.5:1, 2:1, 3:1, both orientations — e.g. a long thin tower in a strip beside the model), and when no single footprint fits, it **splits the purge across two or three smaller towers**. Placement hugs object edges exactly, prefers spots closest to your objects, and validates against the bed and object outlines (`TOWER_WIDTH`/`TOWER_DEPTH` and `TOWER_X`/`TOWER_Y` still override; explicit dimensions force a single tower).
+- With multiple towers, purge is routed per layer across them (one oversized purge can span towers within a single visit, with a retracted hop between), every tower gets coverage on every layer (purge fill, lattice, or a sustaining pass with walls), and each tower is its own Klipper object (`P2KLPU_Tower`, `P2KLPU_Tower2`, ...).
+- On Klipper, the tower is a **real Klipper object**: `EXCLUDE_OBJECT_DEFINE NAME=P2KLPU_Tower` plus `EXCLUDE_OBJECT_START/END` around every tower pass — it appears in Mainsail/Fluidd's bed map and object list, and shows as the currently printing object during purges. **Do NOT cancel it**: cancelling skips the purge extrusion and desyncs the Palette splice schedule (only the printing moves are wrapped, so printer position/retract state survive a cancel — the print's colors will not).
+- The analysis (console + G-code footer) reports **how much of each filament the tower consumes** (purge attributed to the incoming filament, sustaining passes to the loaded one), in mm and cm³ per input.
+- Purge lengths (filament mm): `PURGE_DEFAULT=105` (≈250mm³) and per-pair `PURGE_PETG_PLA=120` / `PURGE_DI1_DI2=90` overrides (input pair > material pair > default).
+- Sustaining passes use the currently loaded filament and also lengthen the current splice segment (free min-splice help).
+
+TOWER directives: `TOWER=0|1`, `TOWER_X`, `TOWER_Y`, `TOWER_WIDTH`, `TOWER_DEPTH`, `TOWER_BRIM_LOOPS=4`, `TOWER_SPEED=2000`, `TOWER_FIRST_LAYER_SPEED=1200`, `TOWER_SUSTAIN_PERIMETERS=2`, `TOWER_SUSTAIN_SPACING=6`, `TOWER_MAX_FLOW=1.8` (mm³/s), `TOWER_SPLICE_DWELL=0` (ms), `TOWER_EXTRUSION_WIDTH` (default: footer `extrusion_width`, else 0.45), `PURGE_DEFAULT`, `PURGE_<FROM>_<TO>`.
+
+### SPLICEOFFSET calibration print
+
+Instead of tuning SPLICEOFFSET print by print, let P2KLPU generate a one-shot calibration print:
+
+1. Slice **any small object** with your normal PrusaSlicer profile (two or more filaments assigned, wipe tower off or on — the model is discarded anyway).
+2. Add `;P2KLPU CALIBRATE_OFFSET=20,20,8` to the directives (start, step, count; optional 4th value = test input, e.g. `20,20,8,2`, or `ALL` to cycle through every filament in the profile — DI1→DI2→DI3→DI4→DI1… — so each color pair's purge tail gets measured, not just the offset). Keep your other directives (MINSPLICE etc.).
+3. Export. P2KLPU replaces the sliced model with a grid of pads but keeps your start/end G-code, temperatures, and profile.
+
+What prints: a grid of **single-layer squares directly on the bed**, each with its **declared offset printed as raised digits in front of it** (e.g. `57.5`). The priming square, marked `P`, is printed first in the start color (it keeps the first splice long enough). For every following square, the **frame (brim + wall loops) is printed first in the outgoing color, then the toolchange declared with that square's own offset** (square 1 = 20 mm, square 2 = 40 mm, …), then the **purge = the fill inside the frame**, alternating start→test color and back. A dense fill is a filament-mm ruler (the legend tells you the mm per fill line), so the fill line where the color flips, counted from the square's front edge, reads the junction arrival directly — the frame around it is just a frame.
+
+Reading it — any square where the color change is visible works, and all of them should agree. The direct way: a **scale is printed on the left of every square**, counting down from `declared + 10` at the front edge (a tick every 10 mm of filament, a number every 30 mm). **The number beside the color change is your SPLICEOFFSET** — no counting. By hand, equivalently:
+1. Count old-color fill lines from the square's front edge until the color changes: `measured = lines × mm-per-line`.
+2. `SPLICEOFFSET = square's declared offset − measured mm` (+10 mm safety so the change lands just inside the purge, never before it).
+3. Count fill lines from the change until the color is fully clean: that tail in mm is your melt-zone purge requirement — set `PURGE_DEFAULT ≥ tail + 30`.
+
+A square that is entirely the new color changed before it started (that offset is too small); one that stays entirely old never received the change (too large) — read a neighbor. Because the formula uses the measured position, a coarse sweep (e.g. `40,10,12`) already gives mm-level results; a fine step just adds redundancy. One print, both numbers.
+
+Adaptive meshing (KAMP etc.): the sliced dummy model's `EXCLUDE_OBJECT_DEFINE` is replaced by one covering the whole calibration grid, so object-aware start macros mesh the squares — not the dummy.
+
+### Palette buffer error 121 and tower pacing
+
+There are **no O-codes that feed filament** — Klipper's `[palette2]` module is passive (it relays the header and answers the device), and the Palette advances filament purely from its buffer switches. While the Palette is *making a splice* it cannot feed at all, so the buffer must cover everything the printer consumes in that window. A print with many splices near MINSPLICE keeps the Palette splicing almost continuously; purging fast through those windows drains the buffer a little more each segment until the collapsed switch trips → **error 121** (and the Palette can't advance right then because the filament is clamped in the splice core).
+
+P2KLPU protects against this by **capping all tower extrusion volumetrically**: `TOWER_MAX_FLOW` (default 1.8 mm³/s ≈ 0.75 mm/s of filament) limits purge/sustain feedrates regardless of layer height, keeping buffer draw during a splice well inside what the Palette recovers between splices. If you still see 121: lower `TOWER_MAX_FLOW` (e.g. 1.2), and/or set `TOWER_SPLICE_DWELL=3000` to pause 3 s at the start of every purge visit so the Palette gets a head start on the next splice. The analysis warns you when most transitions sit at the MINSPLICE floor (continuous-splicing territory). Raising `MINSPLICE`/purge lengths also lowers splice cadence at the cost of more purge.
+
+Not in v1: ramming, multiple towers, non-rectangular bed geometry (bounding box only), configurable z-hop (fixed +0.6mm).
+
 ## Supported `;P2KLPU` directives
 
 Directives are case-insensitive and can appear anywhere in the file.

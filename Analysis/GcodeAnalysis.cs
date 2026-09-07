@@ -26,7 +26,8 @@ sealed record GcodeAnalysis(
     IReadOnlyList<InputUsageSummary> InputUsage,
     IReadOnlyList<PingEvent> Pings,
     IReadOnlyList<string> Warnings,
-    IReadOnlyList<string> Errors)
+    IReadOnlyList<string> Errors,
+    TowerPlanStats? TowerStats = null)
 {
     /// <summary>
     /// True when any error-level finding exists (conditions that make the output unsafe to print).
@@ -54,6 +55,41 @@ sealed record GcodeAnalysis(
         const string FgYellow = "\u001b[33m";
         const string FgGreen = "\u001b[32m";
         const string FgMagenta = "\u001b[35m";
+
+        static bool TryParseHexRgbShared(string? hex, out byte r, out byte g, out byte b)
+        {
+            r = g = b = 0;
+            if (string.IsNullOrWhiteSpace(hex))
+                return false;
+            var s = hex.Trim();
+            if (s.StartsWith('#'))
+                s = s[1..];
+            if (s.Length != 6)
+                return false;
+
+            return byte.TryParse(s[..2], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out r)
+                && byte.TryParse(s[2..4], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out g)
+                && byte.TryParse(s[4..6], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out b);
+        }
+
+        static string FallbackSwatchAnsiShared(int input)
+            => ((input - 1) % 4) switch
+            {
+                0 => FgCyan,
+                1 => FgMagenta,
+                2 => FgYellow,
+                _ => FgGreen,
+            };
+
+        string Swatch(int input, string? colorHex)
+        {
+            if (useColor && TryParseHexRgbShared(colorHex, out var r, out var g, out var b))
+            {
+                var esc = Bold[0]; // ESC — reuse the constant's control char, 24-bit foreground
+                return $"{esc}[38;2;{r};{g};{b}m██{esc}[0m";
+            }
+            return C("██", FallbackSwatchAnsiShared(input), useColor);
+        }
 
         var sb = new StringBuilder();
         sb.AppendLine(C("=== P2KLPU Analysis ===", Bold + FgCyan, useColor));
@@ -143,6 +179,7 @@ sealed record GcodeAnalysis(
                 sb.AppendLine(C($"  - {w}", FgYellow, useColor));
             sb.AppendLine();
         }
+
 
         if (Splices.Count > 0)
         {
@@ -306,18 +343,101 @@ sealed record GcodeAnalysis(
                     + C("min ", Dim, useColor)
                     + C($"#{smallest.Index}", FgMagenta, useColor)
                     + C(" (", Dim, useColor)
-                    + C($"{smallest.FromInput}->{smallest.ToInput}", FgMagenta, useColor)
+                    + C($"{smallest.FromInput}->{RenderToInput(smallest.ToInput)}", FgMagenta, useColor)
                     + C(") ", Dim, useColor)
                     + C(smallest.LengthMm.ToString("0.00", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor)
                     + C(", ", Dim, useColor)
                     + C("max ", Dim, useColor)
                     + C($"#{largest.Index}", FgMagenta, useColor)
                     + C(" (", Dim, useColor)
-                    + C($"{largest.FromInput}->{largest.ToInput}", FgMagenta, useColor)
+                    + C($"{largest.FromInput}->{RenderToInput(largest.ToInput)}", FgMagenta, useColor)
                     + C(") ", Dim, useColor)
                     + C(largest.LengthMm.ToString("0.00", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
             }
             sb.AppendLine();
+        }
+
+        if (TowerStats is { } tower)
+        {
+            sb.AppendLine(C("Tower summary:", Bold + FgCyan, useColor));
+            foreach (var t in tower.Towers)
+            {
+                sb.AppendLine(
+                    "  " + C(t.Name, FgMagenta, useColor)
+                    + "  Position "
+                    + C($"X{t.X.ToString("0.##", CultureInfo.InvariantCulture)} Y{t.Y.ToString("0.##", CultureInfo.InvariantCulture)}", FgGreen, useColor)
+                    + "   Footprint "
+                    + C($"{t.WidthMm.ToString("0.##", CultureInfo.InvariantCulture)} x {t.DepthMm.ToString("0.##", CultureInfo.InvariantCulture)} mm", FgGreen, useColor)
+                    + "   Height "
+                    + C(tower.FinalHeightMm.ToString("0.##", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
+            }
+            sb.AppendLine(
+                "  Purge layers "
+                + C(tower.PurgeLayers.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
+                + "   Sustaining layers "
+                + C(tower.SustainLayers.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
+                + "   Total purge "
+                + C(tower.TotalPurgeMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor)
+                + "   Sustaining "
+                + C(tower.TotalSustainMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
+            sb.AppendLine();
+
+            var towerRows = tower.WasteByToolMm
+                .OrderBy(k => k.Key)
+                .Select(kv =>
+                {
+                    var input = kv.Key + 1;
+                    var usage = InputUsage.FirstOrDefault(u => u.Input == input);
+                    return (
+                        Input: input,
+                        Material: string.IsNullOrWhiteSpace(usage?.Material) ? "?" : usage!.Material,
+                        ColorHex: usage?.ColorHex,
+                        UsedMm: kv.Value,
+                        VolumeCm3: FilamentMath.VolumeFromLength(kv.Value) / 1000.0);
+                })
+                .ToList();
+
+            if (towerRows.Count > 0)
+            {
+                const string inputHeader = "Input";
+                const string materialHeader = "Material";
+                const string usedHeader = "Used(mm)";
+                const string volumeHeader = "Volume(cm3)";
+
+                var inputWidth = Math.Max(inputHeader.Length, towerRows.Max(x => ("DI" + x.Input.ToString(CultureInfo.InvariantCulture)).Length));
+                var materialWidth = Math.Max(materialHeader.Length, towerRows.Max(x => x.Material.Length));
+                var usedWidth = Math.Max(usedHeader.Length, towerRows.Max(x => x.UsedMm.ToString("0.00", CultureInfo.InvariantCulture).Length)) + 1;
+                var volumeWidth = Math.Max(volumeHeader.Length, towerRows.Max(x => x.VolumeCm3.ToString("0.00", CultureInfo.InvariantCulture).Length)) + 1;
+
+                sb.AppendLine("Tower filament usage:");
+                sb.AppendLine(C(
+                    "".PadRight(2)
+                    + inputHeader.PadRight(inputWidth)
+                    + "  "
+                    + materialHeader.PadRight(materialWidth)
+                    + "  "
+                    + usedHeader.PadLeft(usedWidth)
+                    + "  "
+                    + volumeHeader.PadLeft(volumeWidth),
+                    Bold + FgCyan,
+                    useColor));
+
+                foreach (var row in towerRows)
+                {
+                    sb.AppendLine(
+                        Swatch(row.Input, row.ColorHex)
+                        + " "
+                        + C(("DI" + row.Input.ToString(CultureInfo.InvariantCulture)).PadRight(inputWidth), FgMagenta, useColor)
+                        + "  "
+                        + row.Material.PadRight(materialWidth)
+                        + "  "
+                        + C(row.UsedMm.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(usedWidth), FgGreen, useColor)
+                        + "  "
+                        + C(row.VolumeCm3.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(volumeWidth), FgGreen, useColor));
+                }
+
+                sb.AppendLine();
+            }
         }
 
         return sb.ToString();

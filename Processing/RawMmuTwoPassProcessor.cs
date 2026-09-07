@@ -30,6 +30,17 @@ static class RawMmuTwoPassProcessor
     {
         var scan = RawMmuScanner.Scan(inputLines, options);
 
+        // Custom tower (TOWER) mode: plan purge/sustain blocks against the raw scan, then rescan
+        // with the injections so splices, junctions, and pings include all generated extrusion.
+        TowerPlanResult? towerPlan = null;
+        if (options.TowerMode)
+        {
+            towerPlan = TowerPlanner.Plan(inputLines, scan, options);
+            if (towerPlan.Errors.Count == 0 && towerPlan.Injections.Count > 0)
+                scan = RawMmuScanner.Scan(inputLines, options, towerPlan.Injections);
+        }
+        var injections = towerPlan?.Errors.Count == 0 ? towerPlan?.Injections : null;
+
         var jobName = Path.GetFileNameWithoutExtension(displayName);
 
         var filamentColors = SlicerConfigDetector.TryReadFilamentColors(inputLines);
@@ -83,6 +94,13 @@ static class RawMmuTwoPassProcessor
         output.Add($"; TimestampUtc: {timestampUtc:O}");
         output.Add(";");
 
+        // Register each generated tower as a Klipper object (visible in Mainsail/Fluidd's bed map).
+        if (towerPlan is not null)
+        {
+            foreach (var define in towerPlan.ExcludeObjectDefineLines)
+                output.Add(define);
+        }
+
         // Pass 2: replay pass-1 decisions.
         for (var i = 0; i < inputLines.Length; i++)
         {
@@ -98,10 +116,26 @@ static class RawMmuTwoPassProcessor
                 {
                     output.Add($"SET_ACTIVE_SPOOL ID={options.SpoolmanSpoolIds[newTool]!.Value}");
                 }
+
+                // Tower purge visit replacing the toolchange command.
+                if (injections is not null
+                    && injections.TryGetValue(i, out var replace)
+                    && replace.Kind == TowerInjectionKind.ReplaceLine)
+                {
+                    output.AddRange(replace.Lines);
+                }
             }
             else if (!scan.StrippedLineIndexes.Contains(i))
             {
                 output.Add(inputLines[i]);
+
+                // Tower sustaining pass anchored after this line (layer marker).
+                if (injections is not null
+                    && injections.TryGetValue(i, out var insert)
+                    && insert.Kind == TowerInjectionKind.InsertAfterLine)
+                {
+                    output.AddRange(insert.Lines);
+                }
             }
 
             if (scan.PingsAfterLine.TryGetValue(i, out var pingsHere))
@@ -119,6 +153,31 @@ static class RawMmuTwoPassProcessor
         }
 
         AppendSummaryFooter(output, scan, options);
+
+        if (towerPlan?.Stats is { } stats)
+        {
+            output.Add(";");
+            output.Add(";P2KLPU - Custom Tower:");
+            output.Add(";----------------------");
+            foreach (var t in stats.Towers)
+            {
+                output.Add($";  {t.Name,-16} = X{t.X.ToString("0.##", CultureInfo.InvariantCulture)} Y{t.Y.ToString("0.##", CultureInfo.InvariantCulture)}  {t.WidthMm.ToString("0.##", CultureInfo.InvariantCulture)} x {t.DepthMm.ToString("0.##", CultureInfo.InvariantCulture)} mm");
+            }
+            output.Add($";  Purge layers          = {stats.PurgeLayers}");
+            output.Add($";  Sustaining layers     = {stats.SustainLayers}");
+            output.Add($";  Total purge           = {stats.TotalPurgeMm.ToString("0.0", CultureInfo.InvariantCulture)} mm filament");
+            output.Add($";  Total sustaining      = {stats.TotalSustainMm.ToString("0.0", CultureInfo.InvariantCulture)} mm filament");
+            output.Add($";  Tower height          = {stats.FinalHeightMm.ToString("0.##", CultureInfo.InvariantCulture)} mm");
+            output.Add(";  Filament used by tower (purge + sustaining), per input:");
+            foreach (var kv in stats.WasteByToolMm.OrderBy(k => k.Key))
+            {
+                var material = kv.Key < options.FilamentTypes.Count && !string.IsNullOrWhiteSpace(options.FilamentTypes[kv.Key])
+                    ? options.FilamentTypes[kv.Key].Trim()
+                    : "?";
+                var cm3 = FilamentMath.VolumeFromLength(kv.Value) / 1000.0;
+                output.Add($";    DI{kv.Key + 1} ({material}) = {kv.Value.ToString("0.0", CultureInfo.InvariantCulture)} mm ({cm3.ToString("0.00", CultureInfo.InvariantCulture)} cm3)");
+            }
+        }
 
         return output;
     }

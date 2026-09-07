@@ -150,6 +150,64 @@ static partial class SlicerConfigDetector
     }
 
     /// <summary>
+    /// Reads the rectangular bed bounds from the PrusaSlicer <c>bed_shape</c> footer value.
+    /// </summary>
+    /// <remarks>
+    /// PrusaSlicer writes e.g. <c>; bed_shape = 0x0,250x0,250x210,0x210</c>. Non-rectangular beds
+    /// are reduced to their bounding box.
+    /// </remarks>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <returns>The bed bounding box, or <see langword="null"/> when unavailable.</returns>
+    public static AxisAlignedBounds2D? TryReadBedShape(string[] lines)
+    {
+        var raw = TryReadPrusaValue(lines, "bed_shape");
+        if (raw is null || raw.Length == 0)
+            return null;
+
+        double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+        var any = false;
+        foreach (var point in raw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var xy = point.Split('x', StringSplitOptions.TrimEntries);
+            if (xy.Length != 2) continue;
+            if (!double.TryParse(xy[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)) continue;
+            if (!double.TryParse(xy[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var y)) continue;
+            any = true;
+            minX = Math.Min(minX, x);
+            minY = Math.Min(minY, y);
+            maxX = Math.Max(maxX, x);
+            maxY = Math.Max(maxY, y);
+        }
+
+        return any ? new AxisAlignedBounds2D(minX, minY, maxX, maxY) : null;
+    }
+
+    /// <summary>
+    /// Reads a numeric PrusaSlicer footer value (first element when the value is a vector).
+    /// </summary>
+    /// <param name="lines">Input G-code lines.</param>
+    /// <param name="key">The exact footer key.</param>
+    /// <returns>The parsed number, or <see langword="null"/> when unavailable.</returns>
+    public static double? TryReadPrusaDouble(string[] lines, string key)
+    {
+        var raw = TryReadPrusaValue(lines, key);
+        if (raw is null || raw.Length == 0)
+            return null;
+
+        // Vectors use ',' (printer per-extruder) or ';' (filament) separators; take the first element.
+        var first = raw.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (first.Length == 0)
+            return null;
+
+        // Percentages (e.g. extrusion_width = 0 or "0.45" or "200%") — reject percent forms here.
+        var token = first[0];
+        if (token.EndsWith('%'))
+            return null;
+
+        return double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) ? d : null;
+    }
+
+    /// <summary>
     /// Heuristically detects whether the file already appears to contain a Mosaic Omega header.
     /// </summary>
     /// <param name="lines">Input G-code lines.</param>

@@ -18,6 +18,12 @@ using System.Globalization;
 /// <see cref="Options.MmuEOnlyStripThresholdMm"/>; small retract/unretract pairs survive so the
 /// printed file still protects against ooze during the toolchange wipe.
 ///
+/// For custom-tower (TOWER) mode, the scan also tracks head position, layers, retract state,
+/// per-toolchange context, and the model bounding box — and accepts an optional injection map
+/// whose blocks (generated purge/sustain) are accounted into the effective timeline at their
+/// anchor lines, so a second scan pass computes final splice/ping positions including all
+/// generated extrusion.
+///
 /// Tower vs model attribution prefers PrusaSlicer/Slic3r <c>;TYPE:</c> markers; when those markers are absent,
 /// the scanner may fall back to heuristics and will report reduced certainty via warnings.
 /// </remarks>
@@ -30,8 +36,15 @@ static class RawMmuScanner
     /// </summary>
     /// <param name="lines">Input G-code lines.</param>
     /// <param name="options">Processing options that affect ping planning and detection heuristics.</param>
+    /// <param name="injections">
+    /// Optional generated blocks anchored to input lines (custom tower purge/sustain); their
+    /// effective E is accounted at the anchor line so downstream positions include them.
+    /// </param>
     /// <returns>A scan result describing effective extrusion, splices, pings, per-line rewrite decisions, and diagnostics.</returns>
-    public static RawMmuScanResult Scan(string[] lines, Options options)
+    public static RawMmuScanResult Scan(
+        string[] lines,
+        Options options,
+        IReadOnlyDictionary<int, TowerInjection>? injections = null)
     {
         var extrusionAbsolute = false;
         var lastAbsoluteE = 0.0;
@@ -42,8 +55,10 @@ static class RawMmuScanner
         var keptToolchangeEOnlyExtrusion = 0.0;
         var towerEffectiveExtrusion = 0.0;
         var modelEffectiveExtrusion = 0.0;
+        var injectedEffectiveExtrusion = 0.0;
 
         AxisAlignedBounds2D? towerBounds = null;
+        AxisAlignedBounds2D? modelBounds = null;
 
         var inWipeTower = false;
         var sawTypeMarkers = false;
@@ -76,9 +91,25 @@ static class RawMmuScanner
         var inExplicitToolchangeBlock = false;
         var toolchangeLinesLeft = 0;
 
+        // Position/layer/retract tracking (custom tower support).
+        double? currentX = null;
+        double? currentY = null;
+        double? currentZ = null;
+        double? lastFeedrate = null;
+        var retractDepth = 0.0;
+
+        var layers = new List<LayerInfo>();
+        var pendingLayerChangeLine = -1;
+        var toolchangeContexts = new List<ToolchangeContext>();
+
+        // Per-transition junction offset override (calibration prints): ;P2K_CAL OFFSET_NEXT=<mm>
+        double? pendingSpliceOffset = null;
+
         void RecordSplice(int newTool, double extraTailMm = 0)
         {
-            var location = totalEffectiveExtrusion + options.SpliceOffsetMm + extraTailMm;
+            var offset = pendingSpliceOffset ?? options.SpliceOffsetMm;
+            pendingSpliceOffset = null;
+            var location = totalEffectiveExtrusion + offset + extraTailMm;
             var length = location - previousSpliceLocation;
             previousSpliceLocation = location;
 
@@ -90,15 +121,46 @@ static class RawMmuScanner
                 EffectiveLengthMm: length));
         }
 
+        void RecordPing(int lineIndex)
+        {
+            var ping = new RawMmuPing(Index: ++pingIndex, EffectiveLocationMm: totalEffectiveExtrusion);
+            pings.Add(ping);
+            pingPlanner.OnPingInserted(totalEffectiveExtrusion);
+
+            if (pingsAfterLine.TryGetValue(lineIndex, out var existing))
+            {
+                var extended = new List<RawMmuPing>(existing) { ping };
+                pingsAfterLine[lineIndex] = extended;
+            }
+            else
+            {
+                pingsAfterLine[lineIndex] = new List<RawMmuPing> { ping };
+            }
+        }
+
         void OnToolchangeCommand(int lineIndex, int newTool)
         {
             sawAnyToolchange = true;
             toolchangeCommandLines[lineIndex] = newTool;
 
+            toolchangeContexts.Add(new ToolchangeContext(
+                LineIndex: lineIndex,
+                FromTool: currentTool,
+                ToTool: newTool,
+                LayerIndex: layers.Count - 1,
+                ResumeXmm: currentX,
+                ResumeYmm: currentY,
+                ResumeZmm: currentZ,
+                LastFeedrate: lastFeedrate,
+                RetractDepthMm: retractDepth,
+                EffectiveEMm: totalEffectiveExtrusion));
+
             if (currentTool >= 0 && newTool != currentTool)
             {
                 // Only enable heuristic toolchange window if we are not inside an explicit toolchange block.
-                if (!inExplicitToolchangeBlock)
+                // In custom-tower (TOWER) mode there is no slicer tower and no MMU logistics around
+                // toolchanges — the window would only misclassify model moves as tower.
+                if (!inExplicitToolchangeBlock && !options.TowerMode)
                 {
                     inToolchange = true;
                     toolchangeLinesLeft = options.MmuToolchangeWindowLines;
@@ -113,35 +175,63 @@ static class RawMmuScanner
                 toolsUsed.Add(currentTool);
         }
 
-        for (var i = 0; i < lines.Length; i++)
+        void CompleteLayer(double z)
+        {
+            var markerLine = pendingLayerChangeLine;
+            pendingLayerChangeLine = -1;
+            var prevZ = layers.Count > 0 ? layers[^1].Z : 0.0;
+            var height = z - prevZ;
+            if (height <= 0)
+                height = layers.Count > 0 ? layers[^1].HeightMm : z;
+            layers.Add(new LayerInfo(
+                Index: layers.Count,
+                Z: z,
+                HeightMm: height,
+                MarkerLineIndex: markerLine,
+                RetractDepthAtMarkerMm: retractDepth));
+        }
+
+        void ProcessLine(int i)
         {
             var raw = lines[i];
             if (string.IsNullOrWhiteSpace(raw))
-                continue;
+                return;
 
             // PrusaSlicer wipe tower toolchanges include explicit markers that are much more reliable
             // than a fixed line-window heuristic.
-            // Example:
-            //   ; CP TOOLCHANGE START
-            //   ...
-            //   ; CP TOOLCHANGE END
             var trimmed = raw.Trim();
             if (trimmed.StartsWith(";", StringComparison.Ordinal))
             {
                 // PrusaSlicer wipe tower type markers (helps classify tower extrusion even when sparse layers exist)
-                // Examples:
-                //   ;TYPE:Wipe tower
-                //   ;TYPE:Prime tower
                 if (TryParsePrusaType(trimmed, out var prusaType))
                 {
                     sawTypeMarkers = true;
                     inWipeTower = prusaType is PrusaType.WipeTower or PrusaType.PrimeTower;
                 }
 
-                // Prefer explicit toolchange markers when present.
-                // These exist in different PrusaSlicer exports:
-                //   ; CP TOOLCHANGE START / END
-                //   ; TOOLCHANGE START / END
+                // Calibration marker: the next splice uses this junction offset instead of SPLICEOFFSET.
+                if (trimmed.StartsWith(";P2K_CAL OFFSET_NEXT=", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (double.TryParse(trimmed[";P2K_CAL OFFSET_NEXT=".Length..].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var nextOffset))
+                        pendingSpliceOffset = nextOffset;
+                    return;
+                }
+
+                // Layer detection: ;LAYER_CHANGE then ;Z:<z> (or the next Z move).
+                if (trimmed.Equals(";LAYER_CHANGE", StringComparison.OrdinalIgnoreCase))
+                {
+                    pendingLayerChangeLine = i;
+                    return;
+                }
+                if (pendingLayerChangeLine >= 0 && trimmed.StartsWith(";Z:", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (double.TryParse(trimmed[3..].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var zVal))
+                        CompleteLayer(zVal);
+                    return;
+                }
+
+                // Prefer explicit toolchange markers when present:
+                //   ; CP TOOLCHANGE START / END      ; TOOLCHANGE START / END
                 if (trimmed.Contains("TOOLCHANGE START", StringComparison.OrdinalIgnoreCase))
                 {
                     inToolchange = true;
@@ -156,34 +246,34 @@ static class RawMmuScanner
                 }
 
                 // Comments don't carry extrusion, so we can skip them after state update.
-                continue;
+                return;
             }
 
             var code = StripComment(raw);
             if (code.Length == 0)
-                continue;
+                return;
 
             if (code.StartsWith("M82", StringComparison.OrdinalIgnoreCase))
             {
                 extrusionAbsolute = true;
-                continue;
+                return;
             }
             if (code.StartsWith("M83", StringComparison.OrdinalIgnoreCase))
             {
                 extrusionAbsolute = false;
-                continue;
+                return;
             }
             if (code.StartsWith("G92", StringComparison.OrdinalIgnoreCase))
             {
                 if (TryGetParam(code, 'E', out var eSet))
                     lastAbsoluteE = eSet;
-                continue;
+                return;
             }
 
             if (TryParseToolChange(code, out var newTool))
             {
                 OnToolchangeCommand(i, newTool);
-                continue;
+                return;
             }
 
             if (code.StartsWith("ACTIVATE_EXTRUDER", StringComparison.OrdinalIgnoreCase))
@@ -192,7 +282,7 @@ static class RawMmuScanner
                 if (tool.HasValue)
                 {
                     OnToolchangeCommand(i, tool.Value);
-                    continue;
+                    return;
                 }
             }
 
@@ -200,6 +290,20 @@ static class RawMmuScanner
             {
                 if (isArc)
                     sawArcMoves = true;
+
+                // Head position / feedrate tracking (used by the custom tower generator).
+                var hasX = TryGetParam(code, 'X', out var xVal);
+                var hasY = TryGetParam(code, 'Y', out var yVal);
+                if (hasX) currentX = xVal;
+                if (hasY) currentY = yVal;
+                if (TryGetParam(code, 'Z', out var zMove))
+                {
+                    currentZ = zMove;
+                    if (pendingLayerChangeLine >= 0)
+                        CompleteLayer(zMove);
+                }
+                if (TryGetParam(code, 'F', out var fVal))
+                    lastFeedrate = fVal;
 
                 if (TryGetParam(code, 'E', out var e))
                 {
@@ -222,14 +326,23 @@ static class RawMmuScanner
                     // Strip large E-only moves inside a toolchange region: unload/load/ram logistics.
                     // Small E-only moves (retract/unretract pairs) are kept so the printed file still
                     // protects against ooze; with net accounting they cancel out.
-                    // This preserves wipe tower geometry which has X/Y.
+                    // This preserves purge tower geometry which has X/Y.
                     var isEOnly = IsEOnlyMove(code);
                     if (inToolchange && isEOnly && ShouldStripEOnly(delta, options.MmuEOnlyStripThresholdMm))
                     {
                         strippedLineIndexes.Add(i);
                         if (delta > 0)
                             ignoredToolchangeEOnlyPositiveExtrusion += delta;
-                        continue;
+                        return;
+                    }
+
+                    // Retract-state tracking (kept E-only moves are retract/unretract).
+                    if (isEOnly)
+                    {
+                        if (delta < 0)
+                            retractDepth += -delta;
+                        else if (delta > 0)
+                            retractDepth = Math.Max(0, retractDepth - delta);
                     }
 
                     if (delta != 0)
@@ -251,35 +364,17 @@ static class RawMmuScanner
                         else
                             modelEffectiveExtrusion += delta;
 
-                        if (delta > 0 && isTowerMove && TryGetParam(code, 'X', out var x) && TryGetParam(code, 'Y', out var y))
+                        if (delta > 0 && hasX && hasY)
                         {
                             // Arc endpoints slightly underestimate the true bounds (arc bulge); acceptable for diagnostics.
-                            towerBounds = towerBounds is null
-                                ? new AxisAlignedBounds2D(x, y, x, y)
-                                : new AxisAlignedBounds2D(
-                                    MinX: Math.Min(towerBounds.Value.MinX, x),
-                                    MinY: Math.Min(towerBounds.Value.MinY, y),
-                                    MaxX: Math.Max(towerBounds.Value.MaxX, x),
-                                    MaxY: Math.Max(towerBounds.Value.MaxY, y));
+                            if (isTowerMove)
+                                towerBounds = Grow(towerBounds, xVal, yVal);
+                            else
+                                modelBounds = Grow(modelBounds, xVal, yVal);
                         }
 
                         if (delta > 0 && pingPlanner.ShouldInsertPing(totalEffectiveExtrusion))
-                        {
-                            var pingAt = totalEffectiveExtrusion;
-                            var ping = new RawMmuPing(Index: ++pingIndex, EffectiveLocationMm: pingAt);
-                            pings.Add(ping);
-                            pingPlanner.OnPingInserted(pingAt);
-
-                            if (pingsAfterLine.TryGetValue(i, out var existing))
-                            {
-                                var extended = new List<RawMmuPing>(existing) { ping };
-                                pingsAfterLine[i] = extended;
-                            }
-                            else
-                            {
-                                pingsAfterLine[i] = new List<RawMmuPing> { ping };
-                            }
-                        }
+                            RecordPing(i);
                     }
                 }
             }
@@ -292,6 +387,27 @@ static class RawMmuScanner
                 toolchangeLinesLeft--;
                 if (toolchangeLinesLeft <= 0)
                     inToolchange = false;
+            }
+        }
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            ProcessLine(i);
+
+            // Generated tower blocks are accounted at their anchor line so every downstream
+            // position (splices, junctions, pings, totals) includes them.
+            if (injections is not null && injections.TryGetValue(i, out var injection) && injection.EffectiveEMm > 0)
+            {
+                var lump = injection.EffectiveEMm;
+                totalPositiveExtrusion += lump;
+                totalEffectiveExtrusion += lump;
+                towerEffectiveExtrusion += lump;
+                injectedEffectiveExtrusion += lump;
+
+                // At most one ping per injected block: its declared position (post-lump total)
+                // matches the block-end emission point exactly.
+                if (pingPlanner.ShouldInsertPing(totalEffectiveExtrusion))
+                    RecordPing(i);
             }
         }
 
@@ -315,11 +431,11 @@ static class RawMmuScanner
         else if (usedHeuristicToolchangeWindows)
             detection = TowerDetectionMethod.HeuristicWindows;
 
-        // When no tower signals exist, treat everything as model.
+        // When no tower signals exist, everything except injected (generated) purge is model.
         if (detection == TowerDetectionMethod.None)
         {
-            towerEffectiveExtrusion = 0.0;
-            modelEffectiveExtrusion = totalEffectiveExtrusion;
+            towerEffectiveExtrusion = injectedEffectiveExtrusion;
+            modelEffectiveExtrusion = totalEffectiveExtrusion - injectedEffectiveExtrusion;
             towerBounds = null;
         }
 
@@ -343,7 +459,22 @@ static class RawMmuScanner
             Pings: pings,
             StrippedLineIndexes: strippedLineIndexes,
             ToolchangeCommandLines: toolchangeCommandLines,
-            PingsAfterLine: pingsAfterLine);
+            PingsAfterLine: pingsAfterLine,
+            Layers: layers,
+            ToolchangeContexts: toolchangeContexts,
+            ModelBounds: modelBounds,
+            InjectedEffectiveEMm: injectedEffectiveExtrusion);
+    }
+
+    private static AxisAlignedBounds2D Grow(AxisAlignedBounds2D? bounds, double x, double y)
+    {
+        return bounds is null
+            ? new AxisAlignedBounds2D(x, y, x, y)
+            : new AxisAlignedBounds2D(
+                MinX: Math.Min(bounds.Value.MinX, x),
+                MinY: Math.Min(bounds.Value.MinY, y),
+                MaxX: Math.Max(bounds.Value.MaxX, x),
+                MaxY: Math.Max(bounds.Value.MaxY, y));
     }
 
     private static bool ShouldStripEOnly(double delta, double thresholdMm)

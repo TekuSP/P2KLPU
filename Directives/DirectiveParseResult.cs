@@ -48,6 +48,23 @@ sealed record DirectiveParseResult(
         var emitSetActiveSpool = options.EmitSetActiveSpool;
         var octoPrintStripOmegaCommands = options.OctoPrintStripOmegaCommands;
         var strict = options.Strict;
+        var towerMode = options.TowerMode;
+        var towerX = options.TowerXMm;
+        var towerY = options.TowerYMm;
+        var towerWidth = options.TowerWidthMm;
+        var towerDepth = options.TowerDepthMm;
+        var towerBrimLoops = options.TowerBrimLoops;
+        var towerSpeed = options.TowerSpeedMmMin;
+        var towerFirstLayerSpeed = options.TowerFirstLayerSpeedMmMin;
+        var towerSustainPerimeters = options.TowerSustainPerimeters;
+        var towerSustainSpacing = options.TowerSustainSpacingMm;
+        var towerMaxFlow = options.TowerMaxFlowMm3PerSec;
+        var towerSpliceDwell = options.TowerSpliceDwellMs;
+        var towerExtrusionWidth = options.TowerExtrusionWidthMm;
+        var purgeDefault = options.PurgeDefaultMm;
+        var purgeByInput = new Dictionary<TransitionKey, double>(options.PurgeByInput);
+        var purgeByMaterial = new Dictionary<MaterialTransitionKey, double>(options.PurgeByMaterial);
+        var calibrateOffset = options.CalibrateOffset;
         var algoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.AlgorithmOverrides);
         var diAlgoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.DiAlgorithmOverrides);
         var materialAlgoOverrides = new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(options.MaterialAlgorithmOverrides);
@@ -293,6 +310,151 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            if (key is "TOWER")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    towerMode = b;
+                continue;
+            }
+
+            if (key is "TOWER_X")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
+                    towerX = mm;
+                continue;
+            }
+
+            if (key is "TOWER_Y")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm))
+                    towerY = mm;
+                continue;
+            }
+
+            if (key is "TOWER_WIDTH")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                    towerWidth = mm;
+                continue;
+            }
+
+            if (key is "TOWER_DEPTH")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                    towerDepth = mm;
+                continue;
+            }
+
+            if (key is "TOWER_BRIM_LOOPS")
+            {
+                if (int.TryParse(d.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n >= 0)
+                    towerBrimLoops = n;
+                continue;
+            }
+
+            if (key is "TOWER_SPEED")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0)
+                    towerSpeed = f;
+                continue;
+            }
+
+            if (key is "TOWER_FIRST_LAYER_SPEED")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0)
+                    towerFirstLayerSpeed = f;
+                continue;
+            }
+
+            if (key is "TOWER_SUSTAIN_PERIMETERS")
+            {
+                if (int.TryParse(d.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n >= 1)
+                    towerSustainPerimeters = n;
+                continue;
+            }
+
+            // Spacing of the sparse internal lattice on sustaining layers (0 = walls only).
+            if (key is "TOWER_SUSTAIN_SPACING")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm >= 0)
+                    towerSustainSpacing = mm;
+                continue;
+            }
+
+            // Volumetric cap on tower extrusion (mm³/s): keeps consumption during Palette splice
+            // creation below what the buffer can cover (buffer error 121 protection). 0 disables.
+            if (key is "TOWER_MAX_FLOW")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f >= 0)
+                    towerMaxFlow = f;
+                continue;
+            }
+
+            // Optional dwell (ms) at the start of each purge visit, giving the Palette a head start
+            // on the upcoming splice before purge consumption begins.
+            if (key is "TOWER_SPLICE_DWELL")
+            {
+                if (int.TryParse(d.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var ms) && ms >= 0)
+                    towerSpliceDwell = ms;
+                continue;
+            }
+
+            if (key is "TOWER_EXTRUSION_WIDTH")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                    towerExtrusionWidth = mm;
+                continue;
+            }
+
+            // SPLICEOFFSET calibration print: start,step,count[,toDI]
+            //   ;P2KLPU CALIBRATE_OFFSET=20,20,8
+            if (key is "CALIBRATE_OFFSET")
+            {
+                var parts = d.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (parts.Length >= 3
+                    && double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out var start)
+                    && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var step)
+                    && int.TryParse(parts[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var count))
+                {
+                    int? toInput = null;
+                    var allInputs = false;
+                    if (parts.Length >= 4)
+                    {
+                        if (parts[3].Equals("ALL", StringComparison.OrdinalIgnoreCase))
+                            allInputs = true;
+                        else if (int.TryParse(parts[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out var to) && to >= 1)
+                            toInput = to;
+                    }
+                    calibrateOffset = new OffsetCalibration(start, step, count, toInput, allInputs);
+                }
+                continue;
+            }
+
+            if (key is "PURGE_DEFAULT")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm > 0)
+                    purgeDefault = mm;
+                continue;
+            }
+
+            // Per-pair purge lengths (filament mm):
+            //   ;P2KLPU PURGE_PETG_PLA=120
+            //   ;P2KLPU PURGE_DI1_DI2=90   (also IN1/IN2 tokens)
+            if (key.StartsWith("PURGE_", StringComparison.OrdinalIgnoreCase))
+            {
+                var parts = d.Key.Split('_', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (parts.Length == 3
+                    && double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm)
+                    && mm > 0)
+                {
+                    if (TryParseDirectInput(parts[1], out var fromIn) && TryParseDirectInput(parts[2], out var toIn))
+                        purgeByInput[new TransitionKey(fromIn, toIn)] = mm;
+                    else
+                        purgeByMaterial[new MaterialTransitionKey(parts[1], parts[2])] = mm;
+                }
+                continue;
+            }
+
             if (key is "ALGO")
             {
                 // Expected form in Value: "1-2=10,5,3" OR "1-2:10,5,3"
@@ -331,6 +493,23 @@ sealed record DirectiveParseResult(
             PingMacroAfter = pingMacroAfter,
             OctoPrintStripOmegaCommands = octoPrintStripOmegaCommands,
             Strict = strict,
+            TowerMode = towerMode,
+            TowerXMm = towerX,
+            TowerYMm = towerY,
+            TowerWidthMm = towerWidth,
+            TowerDepthMm = towerDepth,
+            TowerBrimLoops = towerBrimLoops,
+            TowerSpeedMmMin = towerSpeed,
+            TowerFirstLayerSpeedMmMin = towerFirstLayerSpeed,
+            TowerSustainPerimeters = towerSustainPerimeters,
+            TowerSustainSpacingMm = towerSustainSpacing,
+            TowerMaxFlowMm3PerSec = towerMaxFlow,
+            TowerSpliceDwellMs = towerSpliceDwell,
+            TowerExtrusionWidthMm = towerExtrusionWidth,
+            PurgeDefaultMm = purgeDefault,
+            PurgeOverridesByInput = purgeByInput,
+            PurgeOverridesByMaterial = purgeByMaterial,
+            CalibrateOffset = calibrateOffset,
             AlgorithmOverrides = algoOverrides,
             DiAlgorithmOverrides = diAlgoOverrides,
             MaterialAlgorithmOverrides = materialAlgoOverrides

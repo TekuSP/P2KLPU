@@ -79,4 +79,30 @@ sealed record Options(
     IReadOnlyDictionary<MaterialTransitionKey, SpliceAlgorithm> MaterialAlgorithmOverrides,
     bool OctoPrintStripOmegaCommands,
     bool NoPause,
-    bool Strict = true);
+    bool Strict = true,
+    bool TowerMode = false,
+    double? TowerXMm = null,
+    double? TowerYMm = null,
+    double? TowerWidthMm = null,
+    double? TowerDepthMm = null,
+    int TowerBrimLoops = 4,
+    double TowerSpeedMmMin = 2000,
+    double TowerFirstLayerSpeedMmMin = 1200,
+    int TowerSustainPerimeters = 2,
+    double TowerSustainSpacingMm = 6,
+    double TowerMaxFlowMm3PerSec = 1.8,
+    int TowerSpliceDwellMs = 0,
+    double? TowerExtrusionWidthMm = null,
+    double PurgeDefaultMm = 105,
+    IReadOnlyDictionary<TransitionKey, double>? PurgeOverridesByInput = null,
+    IReadOnlyDictionary<MaterialTransitionKey, double>? PurgeOverridesByMaterial = null,
+    OffsetCalibration? CalibrateOffset = null)
+{
+    /// <summary>Per-input purge overrides (never null).</summary>
+    public IReadOnlyDictionary<TransitionKey, double> PurgeByInput
+        => PurgeOverridesByInput ?? System.Collections.Immutable.ImmutableDictionary<TransitionKey, double>.Empty;
+
+    /// <summary>Per-material purge overrides (never null).</summary>
+    public IReadOnlyDictionary<MaterialTransitionKey, double> PurgeByMaterial
+        => PurgeOverridesByMaterial ?? System.Collections.Immutable.ImmutableDictionary<MaterialTransitionKey, double>.Empty;
+}

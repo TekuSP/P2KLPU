@@ -206,6 +206,8 @@ internal static class Program
             if (key.StartsWith("ALGO", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("MATERIAL_", StringComparison.OrdinalIgnoreCase)) return true;
             if (key.StartsWith("FILAMENTOVERRIDE", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("PURGE_", StringComparison.OrdinalIgnoreCase)) return true;
+            if (key.StartsWith("TOWER_", StringComparison.OrdinalIgnoreCase)) return true;
 
             // Key/value directives.
             return key.Equals("DEFAULT_ALGO", StringComparison.OrdinalIgnoreCase)
@@ -234,7 +236,9 @@ internal static class Program
                 || key.Equals("PING_MACRO_AFTER", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("SPOOLMAN_SET_ACTIVE_SPOOL", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("STRICT", StringComparison.OrdinalIgnoreCase);
+                || key.Equals("STRICT", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("TOWER", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("CALIBRATE_OFFSET", StringComparison.OrdinalIgnoreCase);
         }
 
         // OctoPrint Palette2 plugin compatibility:
@@ -279,6 +283,23 @@ internal static class Program
             }
         }
 
+        // SPLICEOFFSET calibration print: replace the sliced model with the pad pattern (keeps the
+        // slicer's start/end G-code), then run the normal RAW_MMU pipeline over it.
+        IReadOnlyList<string> calibrationLegend = Array.Empty<string>();
+        if (options.CalibrateOffset is not null)
+        {
+            var calibration = OffsetCalibrationGenerator.Transform(lines, options);
+            if (calibration.Error is not null)
+            {
+                Console.Error.WriteLine("P2KLPU: " + calibration.Error);
+                return Exit(1, options, env);
+            }
+            lines = calibration.Lines;
+            calibrationLegend = calibration.Legend;
+            options = options with { RawMmuMode = true, TowerMode = false, MmuToolchangeWindowLines = 0 };
+            Console.WriteLine($"CALIBRATE_OFFSET: generated a {options.CalibrateOffset.Count}-pad SPLICEOFFSET calibration print (model replaced).");
+        }
+
         // Auto-enable RAW_MMU for PrusaSlicer MMU-style exports when the slicer footer says it's a
         // single-extruder multi-material print and the file doesn't already look like Omega-processed output.
         // This uses slicer-provided footer info (requested) while still allowing explicit directives to win.
@@ -313,6 +334,14 @@ internal static class Program
 
         var analysis = GcodeAnalyzer.Analyze(lines, options);
         Console.WriteLine(analysis.ToConsoleString(displayName, options.Verbose));
+
+        if (calibrationLegend.Count > 0)
+        {
+            Console.WriteLine("Calibration print legend:");
+            foreach (var l in calibrationLegend)
+                Console.WriteLine("  " + l);
+            Console.WriteLine();
+        }
 
         if (options.DryRun)
         {
