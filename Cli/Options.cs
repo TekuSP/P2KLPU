@@ -41,6 +41,7 @@ using System.Collections.Generic;
 /// <param name="MaterialAlgorithmOverrides">Algorithm overrides keyed by material-to-material transitions.</param>
 /// <param name="OctoPrintStripOmegaCommands">Whether to rewrite Omega <c>O*</c> lines into plugin-friendly comments (Marlin safety mode).</param>
 /// <param name="NoPause">Whether to exit immediately (do not wait for a key press) at the end of interactive runs.</param>
+/// <param name="Strict">When true (default), analysis errors (short splices, absolute-E in RAW_MMU, MMU priming) fail the export with a non-zero exit code so the slicer surfaces them.</param>
 /// <seealso cref="DirectiveParseResult"/>
 /// <seealso cref="RawMmuScanner"/>
 sealed record Options(
@@ -77,4 +78,31 @@ sealed record Options(
     IReadOnlyDictionary<TransitionKey, SpliceAlgorithm> DiAlgorithmOverrides,
     IReadOnlyDictionary<MaterialTransitionKey, SpliceAlgorithm> MaterialAlgorithmOverrides,
     bool OctoPrintStripOmegaCommands,
-    bool NoPause);
+    bool NoPause,
+    bool Strict = true,
+    bool TowerMode = false,
+    double? TowerXMm = null,
+    double? TowerYMm = null,
+    double? TowerWidthMm = null,
+    double? TowerDepthMm = null,
+    int TowerBrimLoops = 4,
+    double TowerSpeedMmMin = 2000,
+    double TowerFirstLayerSpeedMmMin = 1200,
+    int TowerSustainPerimeters = 2,
+    double TowerSustainSpacingMm = 6,
+    double TowerMaxFlowMm3PerSec = 1.8,
+    int TowerSpliceDwellMs = 0,
+    double? TowerExtrusionWidthMm = null,
+    double PurgeDefaultMm = 105,
+    IReadOnlyDictionary<TransitionKey, double>? PurgeOverridesByInput = null,
+    IReadOnlyDictionary<MaterialTransitionKey, double>? PurgeOverridesByMaterial = null,
+    OffsetCalibration? CalibrateOffset = null)
+{
+    /// <summary>Per-input purge overrides (never null).</summary>
+    public IReadOnlyDictionary<TransitionKey, double> PurgeByInput
+        => PurgeOverridesByInput ?? System.Collections.Immutable.ImmutableDictionary<TransitionKey, double>.Empty;
+
+    /// <summary>Per-material purge overrides (never null).</summary>
+    public IReadOnlyDictionary<MaterialTransitionKey, double> PurgeByMaterial
+        => PurgeOverridesByMaterial ?? System.Collections.Immutable.ImmutableDictionary<MaterialTransitionKey, double>.Empty;
+}

@@ -91,6 +91,33 @@ public sealed class EndToEndRawMmuToPaletteTests
         Assert.True(o31Count >= 3, $"Expected at least 3 O31 pings, got {o31Count}.");
     }
 
+    [Fact]
+    public void RawMmuMode_WhenNoToolchanges_InfersUsedExtruderFromFooter()
+    {
+        var lines = new[]
+        {
+            "; filament_type = PLA;PLA;PLA;PLA",
+            "; extruder_colour = #6AB5FF;#FF8040;#888888;#A3A3A3",
+            "; perimeter_extruder = 2",
+            "; infill_extruder = 2",
+            "M83",
+            "G1 X0 Y0 E10.0",
+        };
+
+        var options = DefaultOptions() with { RawMmuMode = true };
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines,
+            options,
+            displayName: "print.gcode",
+            sourcePath: "print.gcode",
+            timestampUtc: new DateTime(2026, 1, 28, 0, 0, 0, DateTimeKind.Utc));
+
+        var o25 = processed.FirstOrDefault(l => l.StartsWith("O25 ", StringComparison.OrdinalIgnoreCase));
+        Assert.NotNull(o25);
+        Assert.Contains("O25 D0 D1", o25);
+    }
+
     private static Options DefaultOptions() => new(
         InputPath: "in.gcode",
         OutputPath: "out.gcode",

@@ -40,7 +40,12 @@ static class OmegaHeaderBuilder
 
         header.Add("O26 " + OmegaEncoding.HexifyShort(input.Splices.Count));
         header.Add("O27 " + OmegaEncoding.HexifyShort(input.Pings.Count));
-        header.Add("O28 " + OmegaEncoding.HexifyShort(input.AlgorithmTable.Count));
+        // Palette 2 firmware quirk (discovered empirically by P2PP): with more than 9 algorithm
+        // entries the count must be written as DECIMAL digits, not hex (hex a-f breaks parsing).
+        if (input.AlgorithmTable.Count > 9)
+            header.Add("O28 D" + input.AlgorithmTable.Count.ToString("0000", CultureInfo.InvariantCulture));
+        else
+            header.Add("O28 " + OmegaEncoding.HexifyShort(input.AlgorithmTable.Count));
         header.Add("O29 " + OmegaEncoding.HexifyShort(0));
 
         foreach (var s in input.Splices)
@@ -61,11 +66,11 @@ static class OmegaHeaderBuilder
             header.Add("O40 D" + input.AutoloadingOffsetMm.ToString(CultureInfo.InvariantCulture));
         }
 
+        // The Palette's total job length is the end of the LAST splice (which already includes the
+        // extra end-of-print tail); only fall back to raw totals when there are no splices at all.
         var totalForO1 = input.Splices.Count > 0
             ? input.Splices[^1].EffectiveLocationMm + input.AutoloadingOffsetMm
-            : input.TotalEffectivePositiveExtrusionMm + input.AutoloadingOffsetMm;
-
-        totalForO1 += input.ExtraEndFilamentMm;
+            : input.TotalEffectiveExtrusionMm + input.ExtraEndFilamentMm + input.AutoloadingOffsetMm;
 
         header.Add($"O1 D{SanitizeJobName(input.JobName)} {OmegaEncoding.HexifyLong((int)(totalForO1 + 0.5))}");
 
@@ -96,7 +101,13 @@ static class OmegaHeaderBuilder
                 ? input.FilamentTypes[di].Trim()
                 : $"UNKNOWN{di + 1}";
 
-            var materialId = usedTypes.IndexOf(type) + 1;
+            // Prefer the shared assignment so O25 and O32 always agree; fall back to per-type IDs
+            // (case-insensitive: the used-types list is deduped case-insensitively).
+            int materialId;
+            if (input.MaterialIdByTool is not null && input.MaterialIdByTool.TryGetValue(di, out var mapped))
+                materialId = mapped;
+            else
+                materialId = usedTypes.FindIndex(t => t.Equals(type, StringComparison.OrdinalIgnoreCase)) + 1;
 
             var color = di < input.FilamentColorsHex.Count && IsSixHex(input.FilamentColorsHex[di])
                 ? input.FilamentColorsHex[di].Trim().ToLowerInvariant()
