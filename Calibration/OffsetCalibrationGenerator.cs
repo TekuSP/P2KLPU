@@ -31,17 +31,17 @@ sealed record OffsetCalibrationResult(string[] Lines, IReadOnlyList<string> Lege
 /// <seealso cref="RawMmuScanner"/>
 static class OffsetCalibrationGenerator
 {
-    private const double RowSpacingMm = 8.0;
     private const double BedMarginMm = 15.0;
     private const double TailAllowanceMm = 80.0;
     private const int BrimLoops = 3;
     private const int WallLoops = 2;
+    private const double PlainCellGapMm = 6.0;                 // column clearance between brims (no scale)
 
-    // Direct-reading scale beside each test square: the value printed next to the color change is
-    // the resulting SPLICEOFFSET (declared + 10 at the front edge, counting down along the fill).
+    // Optional direct-reading scale beside each test square (CALIBRATE_SCALE=1): the value printed
+    // next to the color change is the resulting SPLICEOFFSET (declared + 10 at the front edge,
+    // counting down along the fill).
     private const double ScaleWidthMm = 16.0;                  // room reserved left of each square
     private const double ScaleGapMm = 4.0;                     // clearance between scale and the next square
-    private const double CellGapMm = ScaleWidthMm + ScaleGapMm; // column pitch = square + this
     private const double ScaleTickEveryMm = 10.0;              // filament mm between ticks
     private const double ScaleLabelEveryMm = 30.0;             // filament mm between labeled ticks
     private const double ScaleDigitHeightMm = 4.5;
@@ -54,13 +54,16 @@ static class OffsetCalibrationGenerator
     private const double LabelDigitAdvanceMm = 5.5;
     private const double LabelGapMm = 2.5;                                  // between digits and squares
     private const double LabelStripMm = LabelHeightMm + 2 * LabelGapMm;     // room reserved in front of each row
-    private const double RowGapMm = CellGapMm + LabelStripMm;
 
     public static OffsetCalibrationResult Transform(string[] input, Options options)
     {
         var cal = options.CalibrateOffset;
         if (cal is null)
             return Fail(input, "CALIBRATE_OFFSET is not set.");
+
+        // TOWER_SPEED=PRINT & co.: the squares print with the profile's first-layer speed and cap.
+        var (resolvedOptions, speedNote) = TowerProfileSpeeds.Resolve(input, options);
+        options = resolvedOptions;
         if (cal.Count < 1 || cal.Count > 24 || cal.StepMm <= 0)
             return Fail(input, "CALIBRATE_OFFSET needs count 1..24 and a positive step.");
 
@@ -135,18 +138,23 @@ static class OffsetCalibrationGenerator
         var sq = side.Value.Width;
 
         // Grid of (count + 1) cells: square 0 (start-color priming) plus one test square per offset.
+        // Column pitch leaves room for the direct-reading scale only when it is printed; otherwise
+        // the squares sit brim-to-brim with a small clearance. Every row has its label strip in front.
+        var withScale = options.CalibrateScale;
+        var cellGap = withScale ? ScaleWidthMm + ScaleGapMm : PlainCellGapMm;
+        var rowGap = cellGap + LabelStripMm;
+        var leadIn = withScale ? ScaleWidthMm : 0.0;   // the first column's scale sits left of the grid
         var cellCount = cal.Count + 1;
         var usableW = bed.MaxX - bed.MinX - 2 * BedMarginMm;
         var usableD = bed.MaxY - bed.MinY - 2 * BedMarginMm;
-        var cols = Math.Max(1, (int)Math.Floor((usableW + CellGapMm) / (sq + CellGapMm)));
+        var cols = Math.Max(1, (int)Math.Floor((usableW - leadIn + cellGap) / (sq + cellGap)));
         cols = Math.Min(cols, cellCount);
         var rows = (int)Math.Ceiling(cellCount / (double)cols);
-        if (rows * (sq + LabelStripMm) + (rows - 1) * RowSpacingMm > usableD)
+        var gridW = cols * sq + (cols - 1) * cellGap + leadIn;
+        var gridD = rows * sq + (rows - 1) * rowGap + LabelStripMm;
+        if (gridD > usableD)
             return Fail(input, $"CALIBRATE_OFFSET: {cellCount} squares of {sq:0}mm do not fit the bed; reduce count.");
-        // Every column reserves the scale strip on its left, so the first square starts one strip in.
-        var gridW = cols * sq + (cols - 1) * CellGapMm + ScaleWidthMm;
-        var gridD = rows * (sq + LabelStripMm) + (rows - 1) * RowSpacingMm;
-        var originX = (bed.MinX + bed.MaxX) / 2 - gridW / 2 + ScaleWidthMm;
+        var originX = (bed.MinX + bed.MaxX) / 2 - gridW / 2 + leadIn;
         var originY = (bed.MinY + bed.MaxY) / 2 - gridD / 2 + LabelStripMm;
 
         var cells = new List<(int Number, double? Offset, TowerLayout Layout, TowerPathBuilder Builder, int ToolAfter)>();
@@ -154,7 +162,7 @@ static class OffsetCalibrationGenerator
         {
             var c = i % cols;
             var r = i / cols;
-            var layout = new TowerLayout(originX + c * (sq + CellGapMm), originY + r * (sq + RowGapMm), sq, sq, ew, BrimLoops, WallLoops, options.TowerSustainSpacingMm);
+            var layout = new TowerLayout(originX + c * (sq + cellGap), originY + r * (sq + rowGap), sq, sq, ew, BrimLoops, WallLoops, options.TowerSustainSpacingMm);
             if (i == 0)
             {
                 cells.Add((0, null, layout, new TowerPathBuilder(layout, null), fromTool));
@@ -186,10 +194,11 @@ static class OffsetCalibrationGenerator
             $";Z:{F(flh)}",
         };
 
-        // Square 0 (start color) plus ALL the printed labels and scales, so they are in the start color.
-        // Front labels show the declared offset (e.g. "57.5"); the priming square is marked "P".
+        // Square 0 (start color) plus ALL the printed labels (and scales, when enabled), so they are
+        // in the start color. Front labels show the declared offset (e.g. "57.5"); the priming square
+        // is marked "P".
         var primingSubs = new List<TowerSubVisit>();
-        var probe = cells.Count > 1 ? cells[1].Builder.FillOnly(0, flh) : null;
+        var probe = withScale && cells.Count > 1 ? cells[1].Builder.FillOnly(0, flh) : null;
         var mmPerLineForScale = probe is null
             ? 0.0
             : probe.Path.Where(s => s.Seg.Extrude && s.Seg.LengthMm > 3 * ew).Select(s => s.EMm).DefaultIfEmpty(0).Average();
@@ -202,7 +211,7 @@ static class OffsetCalibrationGenerator
             primingSubs.Add(LabelSubVisit(text, cell.Layout.X + 1.0, cell.Layout.Y - LabelGapMm - LabelHeightMm, ew, flh,
                 LabelHeightMm, LabelDigitWidthMm, LabelDigitAdvanceMm));
 
-            if (cell.Offset.HasValue && mmPerLineForScale > 0)
+            if (withScale && cell.Offset.HasValue && mmPerLineForScale > 0)
                 primingSubs.Add(ScaleSubVisit(cell.Layout, cell.Offset.Value, ew, flh, mmPerLineForScale + mmPerJoin));
         }
         primingSubs.Add(cells[0].Builder.BrimAndFullDense(0, flh));
@@ -243,6 +252,7 @@ static class OffsetCalibrationGenerator
         var legend = new List<string>
         {
             $"Squares: {cal.Count} test squares plus the priming square ({cols} per row), {sq:0.#}mm, single layer on the bed, centered; each square's declared offset is printed in front of it (the priming square is marked P, front-left; then left to right, next row back).",
+            $"Speed: {speed:0} mm/min ({speed / 60.0:0.#} mm/s, {speed / 60.0 * ew * flh:0.##} mm³/s)" + (speedNote is not null ? " - " + speedNote : "") + ".",
             cal.AllInputs
                 ? $"Colors: start color = DI{fromTool + 1}; square 0 and all numbers are the start color; test squares cycle {string.Join("->", cycle.Select(t => "DI" + (t + 1)))}->DI{fromTool + 1}... so every color pair gets measured."
                 : $"Colors: start color = DI{fromTool + 1}, test color = DI{toTool + 1}; square 0 and all numbers are the start color; odd squares transition DI{fromTool + 1}->DI{toTool + 1}, even squares DI{toTool + 1}->DI{fromTool + 1}.",
@@ -254,13 +264,17 @@ static class OffsetCalibrationGenerator
             legend.Add($"  Square {cell.Number}: declared SPLICEOFFSET {cell.Offset!.Value:0.#}mm, DI{tr.From + 1}->DI{tr.To + 1}  (X{cell.Layout.X:0.#} Y{cell.Layout.Y:0.#})");
         }
         legend.Add("Reading (any square where the color change is visible works; all should agree):");
-        legend.Add($"  Direct: the scale printed LEFT of each square counts down from (declared + 10) at the front edge, a tick every {ScaleTickEveryMm:0}mm of filament, a number every {ScaleLabelEveryMm:0}mm. The value beside the color change IS your SPLICEOFFSET.");
-        legend.Add($"  By hand: 1. count old-color fill lines from the square's front edge until the color changes: measured = lines x {mmPerLine:0.##}mm.");
+        if (withScale)
+            legend.Add($"  Direct: the scale printed LEFT of each square counts down from (declared + 10) at the front edge, a tick every {ScaleTickEveryMm:0}mm of filament, a number every {ScaleLabelEveryMm:0}mm. The value beside the color change IS your SPLICEOFFSET.");
+        legend.Add($"  {(withScale ? "By hand" : "Count")}: 1. count old-color fill lines from the square's front edge up to the FIRST line showing any trace of the new color: measured = lines x {mmPerLine:0.##}mm. Do NOT count to where the color is clean - that later point is the purge tail, often 60-100mm further, and using it makes the offset far too small (color changes too early in real prints).");
         legend.Add("  2. SPLICEOFFSET = square's declared offset - measured mm (+10mm safety so the change lands just inside the purge, never before it).");
+        legend.Add("  Cross-check without counting: squares whose declared offset is below the true value show the new color already in their FRAME (the change came before the purge); the smallest declared offset whose frame is still entirely the old color is within one step of the answer.");
         legend.Add(cal.AllInputs
             ? $"  3. Count fill lines from the change until the color is fully clean: tail = lines x {mmPerLine:0.##}mm. The tail differs per color pair: set PURGE_DEFAULT >= largest tail + 30, or per pair PURGE_DI<a>_DI<b> >= that pair's tail + 30."
             : $"  3. Count fill lines from the change until the color is fully clean: tail = lines x {mmPerLine:0.##}mm -> set PURGE_DEFAULT >= tail + 30.");
         legend.Add("  A square whose frame or first fill line is already the NEW color changed before its purge started (offset too small); a fully OLD fill never received the change (offset too large) - read a neighbor.");
+        if (!withScale)
+            legend.Add("  Optional: ;P2KLPU CALIBRATE_SCALE=1 prints a direct-reading scale beside each square (the value next to the color change is the SPLICEOFFSET) - off by default because the thin strokes are tedious to remove from the bed.");
 
         body.Add(";");
         body.Add("; P2KLPU calibration legend:");
@@ -283,10 +297,10 @@ static class OffsetCalibrationGenerator
         if (options.Firmware == FirmwareFlavor.Klipper)
         {
             var brimInflate = (BrimLoops + 1) * ew;
-            var minX = originX - brimInflate;
-            var maxX = originX + gridW + brimInflate;
+            var minX = originX - leadIn - brimInflate;
+            var maxX = originX - leadIn + gridW + brimInflate;
             var minY = originY - LabelStripMm;
-            var maxY = originY + (rows - 1) * (sq + RowGapMm) + sq + brimInflate;
+            var maxY = originY + (rows - 1) * (sq + rowGap) + sq + brimInflate;
             var define = string.Create(CultureInfo.InvariantCulture,
                 $"EXCLUDE_OBJECT_DEFINE NAME=P2KLPU_Calibration CENTER={(minX + maxX) / 2:0.###},{(minY + maxY) / 2:0.###} POLYGON=[[{minX:0.###},{minY:0.###}],[{maxX:0.###},{minY:0.###}],[{maxX:0.###},{maxY:0.###}],[{minX:0.###},{maxY:0.###}]]");
 

@@ -42,6 +42,12 @@ using System.Collections.Generic;
 /// <param name="OctoPrintStripOmegaCommands">Whether to rewrite Omega <c>O*</c> lines into plugin-friendly comments (Marlin safety mode).</param>
 /// <param name="NoPause">Whether to exit immediately (do not wait for a key press) at the end of interactive runs.</param>
 /// <param name="Strict">When true (default), analysis errors (short splices, absolute-E in RAW_MMU, MMU priming) fail the export with a non-zero exit code so the slicer surfaces them.</param>
+/// <param name="TowerSpeedMmMin">Tower feedrate on normal layers; default <see cref="TowerProfileSpeeds.FromProfile"/> (-1) = the profile's solid-infill/infill/perimeter speed.</param>
+/// <param name="TowerFirstLayerSpeedMmMin">Tower feedrate on the first layer (also used by the calibration squares); default -1 = the profile's first_layer_speed.</param>
+/// <param name="TowerMaxFlowMm3PerSec">Volumetric cap on tower extrusion (0 = none); default -1 = the profile's max volumetric speed (none set = uncapped).</param>
+/// <param name="TowerSustainLatticeLayers">How many sustaining layers directly below a purge layer carry the support lattice; sustaining layers further down print walls only. Default: all layers that have a purge somewhere above them (the lattice stops only where nothing above lands on it). 1 = only the layer the purge lands on; 0 = never.</param>
+/// <param name="CalibrateOffset">SPLICEOFFSET calibration print settings; null = normal processing.</param>
+/// <param name="CalibrateScale">Print the direct-reading scale beside each calibration square (off by default: the thin strokes are tedious to remove from the bed).</param>
 /// <seealso cref="DirectiveParseResult"/>
 /// <seealso cref="RawMmuScanner"/>
 sealed record Options(
@@ -86,17 +92,19 @@ sealed record Options(
     double? TowerWidthMm = null,
     double? TowerDepthMm = null,
     int TowerBrimLoops = 4,
-    double TowerSpeedMmMin = 2000,
-    double TowerFirstLayerSpeedMmMin = 1200,
+    double TowerSpeedMmMin = TowerProfileSpeeds.FromProfile,
+    double TowerFirstLayerSpeedMmMin = TowerProfileSpeeds.FromProfile,
     int TowerSustainPerimeters = 2,
     double TowerSustainSpacingMm = 6,
-    double TowerMaxFlowMm3PerSec = 1.8,
+    int TowerSustainLatticeLayers = int.MaxValue,
+    double TowerMaxFlowMm3PerSec = TowerProfileSpeeds.FromProfile,
     int TowerSpliceDwellMs = 0,
     double? TowerExtrusionWidthMm = null,
     double PurgeDefaultMm = 105,
     IReadOnlyDictionary<TransitionKey, double>? PurgeOverridesByInput = null,
     IReadOnlyDictionary<MaterialTransitionKey, double>? PurgeOverridesByMaterial = null,
-    OffsetCalibration? CalibrateOffset = null)
+    OffsetCalibration? CalibrateOffset = null,
+    bool CalibrateScale = false)
 {
     /// <summary>Per-input purge overrides (never null).</summary>
     public IReadOnlyDictionary<TransitionKey, double> PurgeByInput

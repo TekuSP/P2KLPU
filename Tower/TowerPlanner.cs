@@ -88,6 +88,12 @@ static class TowerPlanner
         if (scan.ExtrusionIsAbsolute)
             errors.Add("TOWER mode requires relative extrusion (M83).");
 
+        // TOWER_SPEED=PRINT & co.: replace the profile sentinels with footer values.
+        var (resolvedOptions, speedNote) = TowerProfileSpeeds.Resolve(lines, options);
+        options = resolvedOptions;
+        if (speedNote is not null)
+            warnings.Add(speedNote);
+
         if (scan.Layers.Count == 0)
             errors.Add("TOWER mode needs PrusaSlicer layer markers (;LAYER_CHANGE / ;Z:), but none were found.");
 
@@ -166,8 +172,9 @@ static class TowerPlanner
             warnings.Add("TOWER: footer bed_shape missing; bed-bounds validation skipped.");
 
         var brimInflate = (options.TowerBrimLoops + 1) * ew;
+        var objectClearance = TowerPlacementSolver.DefaultClearanceMm;
 
-        var placements = ResolveTowerPlacements(options, sizingDemand, minLayerHeight, ew, brimInflate, bed, objectBounds, errors);
+        var placements = ResolveTowerPlacements(options, sizingDemand, minLayerHeight, ew, brimInflate, objectClearance, bed, objectBounds, errors);
         if (placements is null || errors.Count > 0)
             return TowerPlanResult.Empty(errors, warnings);
 
@@ -227,16 +234,65 @@ static class TowerPlanner
             wasteByTool[tool] = wasteByTool.GetValueOrDefault(tool) + mm;
         }
 
+        // Support lattice only where something above lands on it: a layer carries the lattice when a
+        // purge layer lies above it within TOWER_SUSTAIN_LATTICE_LAYERS layers (default: any distance,
+        // so every layer below the last purge keeps its lattice and only the top purge layer's unused
+        // remainder is left bare). Layers beyond that distance print walls only.
+        var purgeLayerIndices = demandsByLayer.Keys.OrderBy(k => k).ToList();
+
+        // Per-tower purge schedule: the greedy per-layer routing below is simulated up front so a
+        // tower's lattice can stop where no purge lands on THAT tower any more. With several towers
+        // the overflow reaches the later towers only on heavy layers, so their lattice ends early.
+        var purgeLayersByTower = instances.Select(_ => new List<int>()).ToList();
+        foreach (var pl in purgeLayerIndices)
+        {
+            if (pl == 0)
+            {
+                foreach (var set in purgeLayersByTower)
+                    set.Add(0);
+                continue;
+            }
+            var caps = instances.Select(inst => inst.Layout.DenseLayerCapacityMm(scan.Layers[pl].HeightMm)).ToArray();
+            foreach (var demand in demandsByLayer[pl])
+            {
+                var remaining = demand.PurgeMm;
+                for (var i = 0; i < instances.Count && remaining > 0.5; i++)
+                {
+                    if (caps[i] <= 0.5)
+                        continue;
+                    var take = Math.Min(remaining, caps[i]);
+                    caps[i] -= take;
+                    remaining -= take;
+                    if (purgeLayersByTower[i].Count == 0 || purgeLayersByTower[i][^1] != pl)
+                        purgeLayersByTower[i].Add(pl);
+                }
+            }
+        }
+
+        bool LatticeNeededOn(int layerIdx, int towerIdx)
+        {
+            if (options.TowerSustainSpacingMm <= 0 || options.TowerSustainLatticeLayers <= 0)
+                return false;
+            var nextPurge = purgeLayersByTower[towerIdx].FirstOrDefault(p => p > layerIdx, -1);
+            return nextPurge >= 0 && (long)nextPurge - layerIdx <= options.TowerSustainLatticeLayers;
+        }
+
+        // The tower grows layer-synchronized with the model up to the LAST toolchange layer and
+        // stops there: every layer below the last color change gets a pass (sustaining walls +
+        // lattice, or purge fill), so the tower top is always at the nozzle's current Z and the
+        // toolhead never has to descend; nothing is printed above the last color change.
         for (var layerIdx = 0; layerIdx <= lastToolchangeLayer; layerIdx++)
         {
             var layer = scan.Layers[layerIdx];
             var isFirstTowerLayer = layerIdx == 0;
-            var speed = CapSpeed(isFirstTowerLayer ? options.TowerFirstLayerSpeedMmMin : options.TowerSpeedMmMin, layer.HeightMm);
+            var towerLayer = layer;
+            var tIdx = layerIdx;
+            var speed = CapSpeed(isFirstTowerLayer ? options.TowerFirstLayerSpeedMmMin : options.TowerSpeedMmMin, towerLayer.HeightMm);
 
             if (demandsByLayer.TryGetValue(layerIdx, out var layerDemands))
             {
                 purgeLayers++;
-                var cursors = instances.Select(inst => inst.Builder.CreateDenseCursor(layerIdx)).ToList();
+                var cursors = instances.Select(inst => inst.Builder.CreateDenseCursor(tIdx)).ToList();
                 var visited = new bool[instances.Count];
 
                 for (var d = 0; d < layerDemands.Count; d++)
@@ -250,11 +306,11 @@ static class TowerPlanner
                     {
                         // Single change on layer 0 (enforced above): brim + full dense on EVERY tower.
                         foreach (var inst in instances)
-                            subVisits.Add(inst.Builder.BrimAndFullDense(layerIdx, layer.HeightMm));
+                            subVisits.Add(inst.Builder.BrimAndFullDense(tIdx, towerLayer.HeightMm));
                         for (var i = 0; i < cursors.Count; i++)
                         {
                             visited[i] = true;
-                            _ = instances[i].Builder.TakePurge(cursors[i], layer.HeightMm, double.MaxValue, fillRemainderWithLattice: false);
+                            _ = instances[i].Builder.TakePurge(cursors[i], towerLayer.HeightMm, double.MaxValue, fillRemainderWithLattice: false);
                         }
                         actual = subVisits.Sum(s => s.TotalEMm);
                     }
@@ -266,7 +322,7 @@ static class TowerPlanner
                         {
                             if (cursors[i].Exhausted)
                                 continue;
-                            var take = instances[i].Builder.TakePurge(cursors[i], layer.HeightMm, remaining, fillRemainderWithLattice: false);
+                            var take = instances[i].Builder.TakePurge(cursors[i], towerLayer.HeightMm, remaining, fillRemainderWithLattice: false);
                             if (take.TotalEMm <= 0)
                                 continue;
                             visited[i] = true;
@@ -279,18 +335,20 @@ static class TowerPlanner
 
                         if (isLastVisitOnLayer)
                         {
-                            // Every tower gets coverage on every layer: remainder lattice where purge
-                            // landed, a sustaining pass (walls + lattice) where it did not.
+                            // Every tower gets its walls on every tower layer; lattice (over the unused
+                            // remainder, or as the sustaining pass of a tower that got no purge) only
+                            // when the layer above lands purge on it.
                             for (var i = 0; i < instances.Count; i++)
                             {
+                                var latticeNeeded = LatticeNeededOn(layerIdx, i);
                                 if (visited[i])
                                 {
-                                    if (!cursors[i].Exhausted)
-                                        subVisits.Add(instances[i].Builder.TakeRemainderLattice(cursors[i], layer.HeightMm));
+                                    if (latticeNeeded && !cursors[i].Exhausted)
+                                        subVisits.Add(instances[i].Builder.TakeRemainderLattice(cursors[i], towerLayer.HeightMm));
                                 }
                                 else
                                 {
-                                    subVisits.Add(instances[i].Builder.Sustain(layerIdx, layer.HeightMm));
+                                    subVisits.Add(instances[i].Builder.Sustain(tIdx, towerLayer.HeightMm, latticeNeeded ? options.TowerSustainSpacingMm : 0));
                                 }
                             }
                         }
@@ -298,10 +356,11 @@ static class TowerPlanner
                         actual = subVisits.Sum(s => s.TotalEMm);
                     }
 
-                    var header = $"; --- P2KLPU TOWER purge visit: layer {layerIdx}, T{demand.Change.FromTool} -> T{demand.Change.ToTool}, target {demand.PurgeMm.ToString("0.###", CultureInfo.InvariantCulture)}mm";
+                    var target = demand.PurgeMm.ToString("0.###", CultureInfo.InvariantCulture);
+                    var header = $"; --- P2KLPU TOWER purge visit: layer {layerIdx}, T{demand.Change.FromTool} -> T{demand.Change.ToTool}, target {target}mm";
                     var blockLines = new List<string>(emitter.Build(
                         header,
-                        layer,
+                        towerLayer,
                         subVisits,
                         entryDepth: demand.Change.RetractDepthMm,
                         entryZ: demand.Change.ResumeZmm,
@@ -333,16 +392,25 @@ static class TowerPlanner
                 }
 
                 sustainLayers++;
-                var subVisits = instances
-                    .Select(inst => isFirstTowerLayer
-                        ? inst.Builder.BrimAndFullDense(layerIdx, layer.HeightMm)
-                        : inst.Builder.Sustain(layerIdx, layer.HeightMm))
-                    .ToList();
+                var latticeSpacing = 0.0;
+                var subVisits = new List<TowerSubVisit>();
+                for (var i = 0; i < instances.Count; i++)
+                {
+                    var towerSpacing = LatticeNeededOn(layerIdx, i) ? options.TowerSustainSpacingMm : 0;
+                    latticeSpacing = Math.Max(latticeSpacing, towerSpacing);
+                    subVisits.Add(isFirstTowerLayer
+                        ? instances[i].Builder.BrimAndFullDense(tIdx, towerLayer.HeightMm)
+                        : instances[i].Builder.Sustain(tIdx, towerLayer.HeightMm, towerSpacing));
+                }
                 var actual = subVisits.Sum(s => s.TotalEMm);
 
                 var blockLines = new List<string>(emitter.Build(
-                    $"; --- P2KLPU TOWER sustaining pass: layer {layerIdx}",
-                    layer,
+                    isFirstTowerLayer
+                        ? $"; --- P2KLPU TOWER sustaining pass: layer {layerIdx}"
+                        : latticeSpacing > 0
+                            ? $"; --- P2KLPU TOWER sustaining pass: layer {layerIdx}, lattice {latticeSpacing.ToString("0.#", CultureInfo.InvariantCulture)}mm"
+                            : $"; --- P2KLPU TOWER sustaining pass: layer {layerIdx}, walls only",
+                    towerLayer,
                     subVisits,
                     entryDepth: layer.RetractDepthAtMarkerMm,
                     entryZ: null,
@@ -421,6 +489,7 @@ static class TowerPlanner
         double minLayerHeight,
         double ew,
         double brimInflate,
+        double objectClearance,
         AxisAlignedBounds2D? bed,
         List<AxisAlignedBounds2D> objectBounds,
         List<string> errors)
@@ -444,7 +513,7 @@ static class TowerPlanner
                 return null;
             }
 
-            return PlaceSingle(width, depth, options, brimInflate, bed, objectBounds, errors);
+            return PlaceSingle(width, depth, options, brimInflate, objectClearance, bed, objectBounds, errors);
         }
 
         // Shape candidates: square first, then rectangles (both orientations), smallest area first.
@@ -473,7 +542,7 @@ static class TowerPlanner
         {
             foreach (var (w, d) in candidates)
             {
-                if (TowerPlacementSolver.Validate(options.TowerXMm.Value, options.TowerYMm.Value, w, d, brimInflate, bed, objectBounds) is null)
+                if (TowerPlacementSolver.Validate(options.TowerXMm.Value, options.TowerYMm.Value, w, d, brimInflate, bed, objectBounds, objectClearance) is null)
                     return new List<TowerPlacement> { new("P2KLPU_Tower", options.TowerXMm.Value, options.TowerYMm.Value, w, d) };
             }
             errors.Add("TOWER: no footprint shape fits at the explicit TOWER_X/TOWER_Y position; remove it for automatic placement.");
@@ -483,7 +552,7 @@ static class TowerPlanner
         // Auto placement: first shape that finds a free spot.
         foreach (var (w, d) in candidates)
         {
-            var spot = TowerPlacementSolver.Solve(w, d, brimInflate, bed, objectBounds);
+            var spot = TowerPlacementSolver.Solve(w, d, brimInflate, bed, objectBounds, objectClearance);
             if (spot.HasValue)
                 return new List<TowerPlacement> { new("P2KLPU_Tower", spot.Value.X, spot.Value.Y, w, d) };
         }
@@ -510,13 +579,13 @@ static class TowerPlanner
                 continue;
 
             var placed = new List<TowerPlacement>();
-            var obstacles = new List<AxisAlignedBounds2D>(objectBounds);
+            var placedRects = new List<AxisAlignedBounds2D>();
             for (var i = 0; i < n; i++)
             {
                 (double X, double Y, double W, double D)? found = null;
                 foreach (var (w, d) in perCandidates)
                 {
-                    var spot = TowerPlacementSolver.Solve(w, d, brimInflate, bed, obstacles);
+                    var spot = TowerPlacementSolver.Solve(w, d, brimInflate, bed, objectBounds, objectClearance, placedRects);
                     if (spot.HasValue)
                     {
                         found = (spot.Value.X, spot.Value.Y, w, d);
@@ -529,7 +598,7 @@ static class TowerPlanner
 
                 var name = i == 0 ? "P2KLPU_Tower" : $"P2KLPU_Tower{i + 1}";
                 placed.Add(new TowerPlacement(name, found.Value.X, found.Value.Y, found.Value.W, found.Value.D));
-                obstacles.Add(new AxisAlignedBounds2D(
+                placedRects.Add(new AxisAlignedBounds2D(
                     found.Value.X - brimInflate, found.Value.Y - brimInflate,
                     found.Value.X + found.Value.W + brimInflate, found.Value.Y + found.Value.D + brimInflate));
             }
@@ -549,16 +618,17 @@ static class TowerPlanner
         double depth,
         Options options,
         double brimInflate,
+        double objectClearance,
         AxisAlignedBounds2D? bed,
         List<AxisAlignedBounds2D> objectBounds,
         List<string> errors)
     {
         if (options.TowerXMm.HasValue && options.TowerYMm.HasValue)
         {
-            var problem = TowerPlacementSolver.Validate(options.TowerXMm.Value, options.TowerYMm.Value, width, depth, brimInflate, bed, objectBounds);
+            var problem = TowerPlacementSolver.Validate(options.TowerXMm.Value, options.TowerYMm.Value, width, depth, brimInflate, bed, objectBounds, objectClearance);
             if (problem is not null)
             {
-                var suggestion = TowerPlacementSolver.Solve(width, depth, brimInflate, bed, objectBounds);
+                var suggestion = TowerPlacementSolver.Solve(width, depth, brimInflate, bed, objectBounds, objectClearance);
                 errors.Add(
                     $"TOWER: invalid position: {problem}."
                     + (suggestion.HasValue
@@ -569,7 +639,7 @@ static class TowerPlanner
             return new List<TowerPlacement> { new("P2KLPU_Tower", options.TowerXMm.Value, options.TowerYMm.Value, width, depth) };
         }
 
-        var solved = TowerPlacementSolver.Solve(width, depth, brimInflate, bed, objectBounds);
+        var solved = TowerPlacementSolver.Solve(width, depth, brimInflate, bed, objectBounds, objectClearance);
         if (!solved.HasValue)
         {
             errors.Add($"TOWER: no free {width:0.#}x{depth:0.#}mm spot (plus brim) found on the bed; set TOWER_X/TOWER_Y explicitly or reduce the footprint.");

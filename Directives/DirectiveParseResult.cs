@@ -56,8 +56,11 @@ sealed record DirectiveParseResult(
         var towerBrimLoops = options.TowerBrimLoops;
         var towerSpeed = options.TowerSpeedMmMin;
         var towerFirstLayerSpeed = options.TowerFirstLayerSpeedMmMin;
+        var towerFirstLayerSpeedExplicit = false;
+        var towerMaxFlowExplicit = false;
         var towerSustainPerimeters = options.TowerSustainPerimeters;
         var towerSustainSpacing = options.TowerSustainSpacingMm;
+        var towerSustainLatticeLayers = options.TowerSustainLatticeLayers;
         var towerMaxFlow = options.TowerMaxFlowMm3PerSec;
         var towerSpliceDwell = options.TowerSpliceDwellMs;
         var towerExtrusionWidth = options.TowerExtrusionWidthMm;
@@ -65,6 +68,7 @@ sealed record DirectiveParseResult(
         var purgeByInput = new Dictionary<TransitionKey, double>(options.PurgeByInput);
         var purgeByMaterial = new Dictionary<MaterialTransitionKey, double>(options.PurgeByMaterial);
         var calibrateOffset = options.CalibrateOffset;
+        var calibrateScale = options.CalibrateScale;
         var algoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.AlgorithmOverrides);
         var diAlgoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.DiAlgorithmOverrides);
         var materialAlgoOverrides = new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(options.MaterialAlgorithmOverrides);
@@ -352,17 +356,38 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            // TOWER_SPEED=PRINT takes the tower speeds and the flow cap from the sliced profile
+            // (solid infill / first layer speed / max volumetric speed); an explicit number given
+            // for the first-layer speed or the flow cap still wins over that.
             if (key is "TOWER_SPEED")
             {
-                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0)
+                if (IsProfileToken(d.Value))
+                {
+                    towerSpeed = TowerProfileSpeeds.FromProfile;
+                    if (!towerFirstLayerSpeedExplicit)
+                        towerFirstLayerSpeed = TowerProfileSpeeds.FromProfile;
+                    if (!towerMaxFlowExplicit)
+                        towerMaxFlow = TowerProfileSpeeds.FromProfile;
+                }
+                else if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0)
+                {
                     towerSpeed = f;
+                }
                 continue;
             }
 
             if (key is "TOWER_FIRST_LAYER_SPEED")
             {
-                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0)
+                if (IsProfileToken(d.Value))
+                {
+                    towerFirstLayerSpeed = TowerProfileSpeeds.FromProfile;
+                    towerFirstLayerSpeedExplicit = true;
+                }
+                else if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f > 0)
+                {
                     towerFirstLayerSpeed = f;
+                    towerFirstLayerSpeedExplicit = true;
+                }
                 continue;
             }
 
@@ -381,12 +406,30 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            // Number of sustaining layers directly below a purge layer that carry the lattice;
+            // sustaining layers further down print walls only. Default: every layer with a purge
+            // above it (1 = just the layer the purge lands on, 0 = never).
+            if (key is "TOWER_SUSTAIN_LATTICE_LAYERS")
+            {
+                if (int.TryParse(d.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) && n >= 0)
+                    towerSustainLatticeLayers = n;
+                continue;
+            }
+
             // Volumetric cap on tower extrusion (mm³/s): keeps consumption during Palette splice
             // creation below what the buffer can cover (buffer error 121 protection). 0 disables.
             if (key is "TOWER_MAX_FLOW")
             {
-                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f >= 0)
+                if (IsProfileToken(d.Value))
+                {
+                    towerMaxFlow = TowerProfileSpeeds.FromProfile;
+                    towerMaxFlowExplicit = true;
+                }
+                else if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var f) && f >= 0)
+                {
                     towerMaxFlow = f;
+                    towerMaxFlowExplicit = true;
+                }
                 continue;
             }
 
@@ -405,6 +448,7 @@ sealed record DirectiveParseResult(
                     towerExtrusionWidth = mm;
                 continue;
             }
+
 
             // SPLICEOFFSET calibration print: start,step,count[,toDI]
             //   ;P2KLPU CALIBRATE_OFFSET=20,20,8
@@ -427,6 +471,16 @@ sealed record DirectiveParseResult(
                     }
                     calibrateOffset = new OffsetCalibration(start, step, count, toInput, allInputs);
                 }
+                continue;
+            }
+
+            // Direct-reading scale beside each calibration square. Off by default: the thin
+            // single-layer strokes are tedious to remove from the bed.
+            //   ;P2KLPU CALIBRATE_SCALE=1
+            if (key is "CALIBRATE_SCALE")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    calibrateScale = b;
                 continue;
             }
 
@@ -503,6 +557,7 @@ sealed record DirectiveParseResult(
             TowerFirstLayerSpeedMmMin = towerFirstLayerSpeed,
             TowerSustainPerimeters = towerSustainPerimeters,
             TowerSustainSpacingMm = towerSustainSpacing,
+            TowerSustainLatticeLayers = towerSustainLatticeLayers,
             TowerMaxFlowMm3PerSec = towerMaxFlow,
             TowerSpliceDwellMs = towerSpliceDwell,
             TowerExtrusionWidthMm = towerExtrusionWidth,
@@ -510,6 +565,7 @@ sealed record DirectiveParseResult(
             PurgeOverridesByInput = purgeByInput,
             PurgeOverridesByMaterial = purgeByMaterial,
             CalibrateOffset = calibrateOffset,
+            CalibrateScale = calibrateScale,
             AlgorithmOverrides = algoOverrides,
             DiAlgorithmOverrides = diAlgoOverrides,
             MaterialAlgorithmOverrides = materialAlgoOverrides
@@ -600,6 +656,14 @@ sealed record DirectiveParseResult(
             }
 
             return false;
+        }
+
+        static bool IsProfileToken(string text)
+        {
+            var t = text.Trim();
+            return t.Equals("PRINT", StringComparison.OrdinalIgnoreCase)
+                || t.Equals("PROFILE", StringComparison.OrdinalIgnoreCase)
+                || t.Equals("AUTO", StringComparison.OrdinalIgnoreCase);
         }
 
         static bool TryParseBool(string text, out bool value)

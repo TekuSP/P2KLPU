@@ -108,11 +108,19 @@ sealed class TowerLayout
     /// carries lines perpendicular to its fill, so bridges span at most <see cref="SustainSpacing"/>.
     /// </remarks>
     public IReadOnlyList<TowerSegment> SustainSegments(int layerIndex)
+        => SustainSegments(layerIndex, SustainSpacing);
+
+    /// <summary>
+    /// Sustaining pass path with an explicit lattice spacing (0 = walls only). The planner tapers
+    /// the spacing with the distance to the next purge layer: dense right under a purge, sparser
+    /// further down, since each lattice only has to carry the lattice one layer above it.
+    /// </summary>
+    public IReadOnlyList<TowerSegment> SustainSegments(int layerIndex, double spacingMm)
     {
         var segments = new List<TowerSegment>();
         AppendPerimeters(segments, SustainPerimeters);
-        if (SustainSpacing > 0)
-            AppendZigzag(segments, alongX: layerIndex % 2 == 0, step: SustainSpacing);
+        if (spacingMm > 0)
+            AppendZigzag(segments, alongX: layerIndex % 2 == 0, step: Math.Max(ExtrusionWidth * 2, spacingMm));
         return segments;
     }
 

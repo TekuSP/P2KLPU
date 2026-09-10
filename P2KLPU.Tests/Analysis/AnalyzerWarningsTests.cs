@@ -67,6 +67,27 @@ public sealed class AnalyzerWarningsTests
         Assert.Contains(analysis.Warnings, w => w.Contains("Could not detect wipe tower regions", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void Analyze_Warns_WhenEndTailAfterSpliceOffsetIsTooShort()
+    {
+        // The filament end is scheduled with SPLICEOFFSET like every junction: 150 + (-25) leaves
+        // 125mm after the last extrusion, less than the extruder-to-nozzle path plus margin.
+        var lines = new[]
+        {
+            "M83",
+            "T0",
+            "G1 X0 Y0 E300.0",
+            "T1",
+            "G1 X10 Y10 E300.0",
+        };
+
+        var shortTail = GcodeAnalyzer.Analyze(lines, DefaultOptions() with { ExtraEndFilamentMm = 150, SpliceOffsetMm = -25 });
+        Assert.Contains(shortTail.Warnings, w => w.Contains("End-of-print tail is only 125mm", StringComparison.Ordinal) && w.Contains("EXTRAENDFILAMENT", StringComparison.Ordinal));
+
+        var okTail = GcodeAnalyzer.Analyze(lines, DefaultOptions() with { ExtraEndFilamentMm = 150, SpliceOffsetMm = 60 });
+        Assert.DoesNotContain(okTail.Warnings, w => w.Contains("End-of-print tail", StringComparison.Ordinal));
+    }
+
     private static Options DefaultOptions() => new(
         InputPath: "in.gcode",
         OutputPath: "out.gcode",

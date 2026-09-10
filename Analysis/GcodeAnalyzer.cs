@@ -407,6 +407,19 @@ static class GcodeAnalyzer
             warnings.Add($"MINSPLICE={options.MinSpliceLengthMm:0.##}mm is below the Palette 2 manual minimum of 60mm.");
         if (options.PingInitialIntervalMm < 100)
             warnings.Add($"Ping interval {options.PingInitialIntervalMm:0.##}mm is very small; pings that close together can destabilize Palette compensation.");
+
+        // The end of the filament is scheduled like any other junction: SPLICEOFFSET shifts it too.
+        // What reaches the nozzle after the last extrusion is EXTRAENDFILAMENT + SPLICEOFFSET, and
+        // the extruder can only push while it still grips the filament, so that tail must cover the
+        // extruder-to-nozzle path (about 100mm on a direct-drive toolhead) with margin.
+        var effectiveTail = options.ExtraEndFilamentMm + options.SpliceOffsetMm;
+        if (effectiveTail < 150)
+        {
+            warnings.Add(
+                $"End-of-print tail is only {effectiveTail:0.##}mm (EXTRAENDFILAMENT {options.ExtraEndFilamentMm:0.##} + SPLICEOFFSET {options.SpliceOffsetMm:0.##}). "
+                + "The filament end must still cover the extruder-to-nozzle path (~100mm) after the last extrusion, and a SPLICEOFFSET that is too low shortens the tail one-for-one — "
+                + "the last part of the print can run dry. Raise EXTRAENDFILAMENT so that EXTRAENDFILAMENT + SPLICEOFFSET is at least 150mm.");
+        }
     }
 
     /// <summary>

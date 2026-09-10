@@ -5,40 +5,61 @@ using System.Collections.Generic;
 /// Finds a free spot on the bed for the purge tower, close to the printed objects.
 /// </summary>
 /// <remarks>
-/// Grid-searches the bed at 5mm resolution for a rectangle (footprint + brim + margin) inside the
-/// bed and overlapping no object; among feasible candidates picks the one closest to the nearest
-/// object (shortest purge travels), tie-breaking toward the bed center.
+/// Grid-searches the bed at 5mm resolution for a rectangle (footprint + brim) inside the bed that
+/// overlaps no obstacle; printed objects are inflated by the requested clearance (a few mm in
+/// synchronized mode, the toolhead's reach in lagging mode where the nozzle descends beside the
+/// model), other towers by a small fixed gap. Among feasible candidates it picks the one closest to
+/// the nearest object (shortest purge travels), tie-breaking toward the bed center.
 /// </remarks>
 /// <seealso cref="ObjectOutlineScanner"/>
 static class TowerPlacementSolver
 {
     private const double GridStepMm = 5.0;
-    private const double ClearanceMm = 5.0;
+    private const double BedMarginMm = 5.0;
+
+    /// <summary>Clearance to objects in synchronized mode, and between towers in every mode.</summary>
+    public const double DefaultClearanceMm = 5.0;
 
     /// <summary>
     /// Solves for the tower's front-left corner.
     /// </summary>
     /// <param name="footprintWidth">Tower footprint width (without brim).</param>
     /// <param name="footprintDepth">Tower footprint depth (without brim).</param>
-    /// <param name="brimInflate">Extra clearance for the brim on each side.</param>
+    /// <param name="brimInflate">Extra room for the brim on each side.</param>
     /// <param name="bed">Bed bounds; when null, a position near the objects is still chosen but bed limits are not enforced.</param>
-    /// <param name="objects">Object bounds to avoid (model bbox fallback acceptable).</param>
+    /// <param name="objects">Printed object bounds to avoid (model bbox fallback acceptable).</param>
+    /// <param name="objectClearanceMm">Minimum gap between the tower (incl. brim) and any printed object.</param>
+    /// <param name="otherTowers">Already placed towers (incl. brim) to avoid with the default gap.</param>
     /// <returns>The chosen (x, y) or <see langword="null"/> when no feasible spot exists.</returns>
     public static (double X, double Y)? Solve(
         double footprintWidth,
         double footprintDepth,
         double brimInflate,
         AxisAlignedBounds2D? bed,
-        IReadOnlyList<AxisAlignedBounds2D> objects)
+        IReadOnlyList<AxisAlignedBounds2D> objects,
+        double objectClearanceMm = DefaultClearanceMm,
+        IReadOnlyList<AxisAlignedBounds2D>? otherTowers = null)
     {
-        var needW = footprintWidth + 2 * (brimInflate + ClearanceMm);
-        var needD = footprintDepth + 2 * (brimInflate + ClearanceMm);
+        var needW = footprintWidth + 2 * brimInflate;
+        var needD = footprintDepth + 2 * brimInflate;
 
-        // Search area: the bed, or (without bed info) a generous region around the objects.
+        var obstacles = new List<AxisAlignedBounds2D>(objects.Count + (otherTowers?.Count ?? 0));
+        foreach (var o in objects)
+            obstacles.Add(Inflate(o, objectClearanceMm));
+        if (otherTowers is not null)
+        {
+            foreach (var t in otherTowers)
+                obstacles.Add(Inflate(t, DefaultClearanceMm));
+        }
+
+        // Search area: the bed (minus a small margin), or (without bed info) a generous region
+        // around the objects.
         AxisAlignedBounds2D search;
         if (bed.HasValue)
         {
-            search = bed.Value;
+            search = new AxisAlignedBounds2D(
+                bed.Value.MinX + BedMarginMm, bed.Value.MinY + BedMarginMm,
+                bed.Value.MaxX - BedMarginMm, bed.Value.MaxY - BedMarginMm);
         }
         else if (objects.Count > 0)
         {
@@ -65,7 +86,7 @@ static class TowerPlacementSolver
             xCandidates.Add(cx);
         for (var cy = search.MinY; cy + needD <= search.MaxY + 1e-9; cy += GridStepMm)
             yCandidates.Add(cy);
-        foreach (var o in objects)
+        foreach (var o in obstacles)
         {
             foreach (var cx in new[] { o.MaxX, o.MinX - needW })
             {
@@ -89,7 +110,7 @@ static class TowerPlacementSolver
                 var candidate = new AxisAlignedBounds2D(cx, cy, cx + needW, cy + needD);
 
                 var overlaps = false;
-                foreach (var o in objects)
+                foreach (var o in obstacles)
                 {
                     if (Overlaps(candidate, o))
                     {
@@ -116,7 +137,7 @@ static class TowerPlacementSolver
                 if (score < bestScore)
                 {
                     bestScore = score;
-                    best = (cx + brimInflate + ClearanceMm, cy + brimInflate + ClearanceMm);
+                    best = (cx + brimInflate, cy + brimInflate);
                 }
             }
         }
@@ -135,7 +156,8 @@ static class TowerPlacementSolver
         double footprintDepth,
         double brimInflate,
         AxisAlignedBounds2D? bed,
-        IReadOnlyList<AxisAlignedBounds2D> objects)
+        IReadOnlyList<AxisAlignedBounds2D> objects,
+        double objectClearanceMm = DefaultClearanceMm)
     {
         var rect = new AxisAlignedBounds2D(
             x - brimInflate, y - brimInflate,
@@ -152,14 +174,15 @@ static class TowerPlacementSolver
 
         foreach (var o in objects)
         {
-            var inflated = new AxisAlignedBounds2D(
-                o.MinX - ClearanceMm, o.MinY - ClearanceMm, o.MaxX + ClearanceMm, o.MaxY + ClearanceMm);
-            if (Overlaps(rect, inflated))
-                return $"tower (incl. brim) {rect} overlaps object at {o} (+{ClearanceMm}mm clearance)";
+            if (Overlaps(rect, Inflate(o, objectClearanceMm)))
+                return $"tower (incl. brim) {rect} is closer than {objectClearanceMm:0.#}mm to the object at {o}";
         }
 
         return null;
     }
+
+    private static AxisAlignedBounds2D Inflate(AxisAlignedBounds2D b, double by)
+        => new(b.MinX - by, b.MinY - by, b.MaxX + by, b.MaxY + by);
 
     private static bool Overlaps(AxisAlignedBounds2D a, AxisAlignedBounds2D b)
         => a.MinX < b.MaxX && b.MinX < a.MaxX && a.MinY < b.MaxY && b.MinY < a.MaxY;

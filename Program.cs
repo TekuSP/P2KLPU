@@ -238,7 +238,8 @@ internal static class Program
                 || key.Equals("OCTOPRINT_STRIP_O_COMMANDS", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("STRICT", StringComparison.OrdinalIgnoreCase)
                 || key.Equals("TOWER", StringComparison.OrdinalIgnoreCase)
-                || key.Equals("CALIBRATE_OFFSET", StringComparison.OrdinalIgnoreCase);
+                || key.Equals("CALIBRATE_OFFSET", StringComparison.OrdinalIgnoreCase)
+                || key.Equals("CALIBRATE_SCALE", StringComparison.OrdinalIgnoreCase);
         }
 
         // OctoPrint Palette2 plugin compatibility:

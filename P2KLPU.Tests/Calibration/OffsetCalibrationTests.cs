@@ -103,14 +103,36 @@ public sealed class OffsetCalibrationTests
         });
         Assert.True(labelExtrudes >= 4, $"expected printed digit strokes in front of pad 1, found {labelExtrudes}");
 
-        // Direct-reading scale: extrusion strokes LEFT of square 1, within its fill rows.
+        // No side scale by default (its thin strokes are tedious to remove from the bed): the legend
+        // gives the counting method plus the opt-in hint, and the columns sit close together.
+        Assert.DoesNotContain(result.Legend, l => l.Contains("IS your SPLICEOFFSET", StringComparison.Ordinal));
+        Assert.Contains(result.Legend, l => l.Contains("CALIBRATE_SCALE=1", StringComparison.Ordinal));
+        Assert.Equal(6.0, ColumnGapMm(result.Legend), 3);
+    }
+
+    [Fact]
+    public void Generator_ScaleOptIn_PrintsDirectReadingScaleLeftOfSquares()
+    {
+        var input = BuildSlicedFixture();
+        var options = BaseOptions() with { CalibrateOffset = new OffsetCalibration(20, 20, 8, null), CalibrateScale = true };
+
+        var result = OffsetCalibrationGenerator.Transform(input, options);
+        Assert.Null(result.Error);
+        var lines = result.Lines;
+
         var sq1X = double.MaxValue;
+        var padFrontY = double.MaxValue;
         foreach (var l in result.Legend)
         {
+            if (!l.Contains("Square 1: declared", StringComparison.Ordinal)) continue;
             var xIdx = l.IndexOf("(X", StringComparison.Ordinal);
-            if (l.Contains("Square 1: declared", StringComparison.Ordinal) && xIdx > 0)
-                sq1X = double.Parse(l[(xIdx + 2)..].Split(' ')[0], CultureInfo.InvariantCulture);
+            var yIdx = l.IndexOf(" Y", StringComparison.Ordinal);
+            sq1X = double.Parse(l[(xIdx + 2)..].Split(' ')[0], CultureInfo.InvariantCulture);
+            padFrontY = double.Parse(l[(yIdx + 2)..].TrimEnd(')'), CultureInfo.InvariantCulture);
         }
+        Assert.True(sq1X < double.MaxValue, "legend must list square 1's position");
+
+        // Extrusion strokes LEFT of square 1, within its fill rows: ticks and scale digits.
         var scaleExtrudes = lines.Count(l =>
         {
             if (!l.StartsWith("G1 ", StringComparison.Ordinal) || !l.Contains(" E", StringComparison.Ordinal)) return false;
@@ -123,6 +145,23 @@ public sealed class OffsetCalibrationTests
         });
         Assert.True(scaleExtrudes >= 10, $"expected scale ticks/labels left of square 1, found {scaleExtrudes}");
         Assert.Contains(result.Legend, l => l.Contains("IS your SPLICEOFFSET", StringComparison.Ordinal));
+        Assert.Equal(20.0, ColumnGapMm(result.Legend), 3); // scale strip (16) + clearance (4) between columns
+    }
+
+    /// <summary>Clearance between neighbouring squares in a row: pitch (square 1 → square 2) minus the square size.</summary>
+    private static double ColumnGapMm(IReadOnlyList<string> legend)
+    {
+        double X(int square)
+        {
+            var l = legend.Single(s => s.Contains($"Square {square}: declared", StringComparison.Ordinal));
+            var xIdx = l.IndexOf("(X", StringComparison.Ordinal);
+            return double.Parse(l[(xIdx + 2)..].Split(' ')[0], CultureInfo.InvariantCulture);
+        }
+        var sizeLine = legend[0];
+        var mmIdx = sizeLine.IndexOf("mm, single layer", StringComparison.Ordinal);
+        var sizeStart = sizeLine.LastIndexOf(' ', mmIdx) + 1;
+        var size = double.Parse(sizeLine[sizeStart..mmIdx], CultureInfo.InvariantCulture);
+        return X(2) - X(1) - size;
     }
 
     [Fact]

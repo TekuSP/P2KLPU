@@ -90,10 +90,13 @@ sealed class TowerPathBuilder
         return new TowerSubVisit(ObjectName, path, printed, "lattice");
     }
 
-    /// <summary>Sustaining pass: perimeter walls + sparse support lattice.</summary>
-    public TowerSubVisit Sustain(int layerIndex, double layerHeightMm)
+    /// <summary>Sustaining pass: perimeter walls + sparse support lattice (layout default spacing, or an explicit one).</summary>
+    public TowerSubVisit Sustain(int layerIndex, double layerHeightMm, double? latticeSpacingMm = null)
     {
-        var path = WithE(Layout.SustainSegments(layerIndex), layerHeightMm, out var printed);
+        var segments = latticeSpacingMm.HasValue
+            ? Layout.SustainSegments(layerIndex, latticeSpacingMm.Value)
+            : Layout.SustainSegments(layerIndex);
+        var path = WithE(segments, layerHeightMm, out var printed);
         return new TowerSubVisit(ObjectName, path, printed, "sustain");
     }
 

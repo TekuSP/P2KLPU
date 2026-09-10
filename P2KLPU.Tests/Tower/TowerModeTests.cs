@@ -375,6 +375,99 @@ public sealed class TowerModeTests
     }
 
     [Fact]
+    public void Planner_GrowsEveryLayerUpToTheLastChange_AndNothingAbove()
+    {
+        // 40 layers, one color change on layer 30 (Z 6.2): the tower gets a pass on every layer up
+        // to and including 30 so its top always sits at the nozzle's Z (no Z excursions), and
+        // nothing at all on layers 31..39.
+        var lines = BuildTallFixture(layers: 40, changeLayer: 30);
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" } };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+        Assert.NotNull(analysis.TowerStats);
+        Assert.Equal(1, analysis.TowerStats!.PurgeLayers);
+        Assert.Equal(30, analysis.TowerStats!.SustainLayers); // layers 0..29
+        Assert.Equal(6.2, analysis.TowerStats!.FinalHeightMm, 3);
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var passLayers = processed
+            .Where(l => l.Contains("P2KLPU TOWER sustaining pass: layer", StringComparison.Ordinal) || l.Contains("P2KLPU TOWER purge visit: layer", StringComparison.Ordinal))
+            .Select(l => int.Parse(l.Split("layer ")[1].Split(',')[0].Trim(), CultureInfo.InvariantCulture))
+            .ToList();
+        Assert.Equal(31, passLayers.Count);
+        Assert.Equal(30, passLayers.Max());
+
+        // Every tower pass prints at the model's current Z: no Z below the layer it belongs to.
+        var purgeIdx = processed.ToList().FindIndex(l => l.Contains("P2KLPU TOWER purge visit: layer 30", StringComparison.Ordinal));
+        var endIdx = processed.ToList().FindIndex(purgeIdx, l => l.Contains("purge visit end", StringComparison.Ordinal));
+        var zMoves = processed.Skip(purgeIdx).Take(endIdx - purgeIdx)
+            .Where(l => l.StartsWith("G1 Z", StringComparison.Ordinal))
+            .Select(l => double.Parse(l.Split(' ')[1][1..], CultureInfo.InvariantCulture))
+            .ToList();
+        Assert.NotEmpty(zMoves);
+        Assert.All(zMoves, z => Assert.True(z >= 6.2 - 1e-9, $"tower visit must not dip below the current layer (Z {z})"));
+    }
+
+    [Fact]
+    public void Planner_PrintsSustainLattice_WhereverAPurgeLiesAbove_AndCanRestrictIt()
+    {
+        // Change on layer 30. Default: every sustaining layer below it has a purge above, so all of
+        // them carry the 6mm lattice. Restricted to 1 layer: only layer 29 keeps it, the rest are
+        // walls only and cost the same, clearly less than the layer under the purge.
+        var lines = BuildTallFixture(layers: 40, changeLayer: 30);
+        var baseOptions = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" } };
+
+        var allLattice = P2ppNetProcessor.ProcessLines(
+            lines, baseOptions, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+        Assert.Equal(29, allLattice.Count(l => l.Contains("sustaining pass: layer", StringComparison.Ordinal) && l.EndsWith("lattice 6mm", StringComparison.Ordinal)));
+        Assert.DoesNotContain(allLattice, l => l.Contains("walls only", StringComparison.Ordinal));
+
+        var options = baseOptions with { TowerSustainLatticeLayers = 1 };
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        double PassExtrusion(int layer)
+        {
+            var list = processed.ToList();
+            var start = list.FindIndex(l => l.StartsWith($"; --- P2KLPU TOWER sustaining pass: layer {layer},", StringComparison.Ordinal));
+            Assert.True(start >= 0, $"missing sustaining pass for layer {layer}");
+            var end = list.FindIndex(start, l => l.Contains("sustaining pass end", StringComparison.Ordinal));
+            var e = 0.0;
+            foreach (var l in list.Skip(start).Take(end - start))
+            {
+                if (!l.StartsWith("G1 ", StringComparison.Ordinal) || !l.Contains(" X", StringComparison.Ordinal)) continue;
+                var tok = l.Split(' ').FirstOrDefault(t => t.StartsWith('E'));
+                if (tok is not null) e += double.Parse(tok[1..], CultureInfo.InvariantCulture);
+            }
+            return e;
+        }
+
+        var under = PassExtrusion(29);
+        var second = PassExtrusion(28);
+        var deep = PassExtrusion(10);
+
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 29, lattice 6mm", StringComparison.Ordinal));
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 28, walls only", StringComparison.Ordinal));
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 10, walls only", StringComparison.Ordinal));
+        Assert.Equal(second, deep, 3);
+        Assert.True(deep < under * 0.75, $"walls-only layers must be clearly cheaper than the layer under the purge ({deep:0.##} vs {under:0.##})");
+
+        // Two lattice layers under a purge: layer 28 gets the lattice as well, layer 27 does not.
+        var two = P2ppNetProcessor.ProcessLines(
+            lines, options with { TowerSustainLatticeLayers = 2 }, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+        Assert.Contains(two, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 28, lattice 6mm", StringComparison.Ordinal));
+        Assert.Contains(two, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 27, walls only", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Planner_SplitsIntoTwoTowers_WhenNoSingleFootprintFits()
     {
         // Free space: two 100mm-wide, 35mm-deep pockets at the top (a column splits the strip).
@@ -534,10 +627,61 @@ public sealed class TowerModeTests
 
     // ---------- Fixture / helpers ----------
 
+    [Fact]
+    public void Planner_TakesSpeedsFromTheProfile_WhenTowerSpeedIsPrint()
+    {
+        // solid infill 60 mm/s -> 3600 mm/min on normal layers; first layer 50% of that -> 1800;
+        // cap = smallest filament max volumetric speed (8) which does not bind at these speeds.
+        var lines = BuildTowerFixture(extraFooter: new[]
+        {
+            "; infill_speed = 80",
+            "; solid_infill_speed = 60",
+            "; perimeter_speed = 45",
+            "; first_layer_speed = 50%",
+            "; max_volumetric_speed = 0",
+            "; filament_max_volumetric_speed = 8,12",
+        });
+        var options = TowerOptions() with
+        {
+            FilamentTypes = new[] { "PETG", "PETG" },
+            TowerSpeedMmMin = TowerProfileSpeeds.FromProfile,
+            TowerFirstLayerSpeedMmMin = TowerProfileSpeeds.FromProfile,
+            TowerMaxFlowMm3PerSec = TowerProfileSpeeds.FromProfile,
+        };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+        Assert.Contains(analysis.Warnings, w => w.Contains("speeds from the print profile", StringComparison.Ordinal) && w.Contains("60mm/s", StringComparison.Ordinal) && w.Contains("30mm/s", StringComparison.Ordinal) && w.Contains("8mm", StringComparison.Ordinal));
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+        var towerExtrudes = ExtractTowerExtrusionLines(processed);
+        Assert.Contains(towerExtrudes, l => l.EndsWith("F3600", StringComparison.Ordinal)); // purge visit on layer 1
+        Assert.Contains(towerExtrudes, l => l.EndsWith("F1800", StringComparison.Ordinal)); // base on layer 0
+        Assert.DoesNotContain(towerExtrudes, l => l.EndsWith("F2000", StringComparison.Ordinal) || l.EndsWith("F1200", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Directives_TowerSpeedPrint_SetsProfileSentinels_ButExplicitNumbersWin()
+    {
+        var directives = new List<Directive>
+        {
+            new(";P2KLPU TOWER_MAX_FLOW=3", "TOWER_MAX_FLOW", "3"),
+            new(";P2KLPU TOWER_SPEED=PRINT", "TOWER_SPEED", "PRINT"),
+        };
+        var options = new DirectiveParseResult(true, -1, -1, directives).ApplyTo(TowerOptions());
+
+        Assert.Equal(TowerProfileSpeeds.FromProfile, options.TowerSpeedMmMin);
+        Assert.Equal(TowerProfileSpeeds.FromProfile, options.TowerFirstLayerSpeedMmMin);
+        Assert.Equal(3, options.TowerMaxFlowMm3PerSec);
+    }
+
     private static string[] BuildTowerFixture(
         int wipeTowerFooter = 0,
         string objectPolygon = "[[100,100],[150,100],[150,150],[100,150]]",
-        string? extraObjectPolygon = null)
+        string? extraObjectPolygon = null,
+        string[]? extraFooter = null)
     {
         var lines = new List<string>
         {
@@ -553,6 +697,8 @@ public sealed class TowerModeTests
         };
         if (extraObjectPolygon is not null)
             lines.Add($"EXCLUDE_OBJECT_DEFINE NAME=column CENTER=125,232 POLYGON={extraObjectPolygon}");
+        if (extraFooter is not null)
+            lines.AddRange(extraFooter);
         lines.AddRange(new[]
         {
             "M83",
@@ -581,6 +727,38 @@ public sealed class TowerModeTests
         lines.Add("G1 X100 Y100 F9000");
         lines.Add("G1 X150 Y150 E200.0 F1500");
 
+        return lines.ToArray();
+    }
+
+    /// <summary>A 0.2mm-layer print of the given height with one T0->T1 change mid-way through <paramref name="changeLayer"/>.</summary>
+    private static string[] BuildTallFixture(int layers, int changeLayer)
+    {
+        var lines = new List<string>
+        {
+            "; gcode_flavor = klipper",
+            "; filament_type = PETG;PETG",
+            "; extruder_colour = #FF0000;#0000FF",
+            "; wipe_tower = 0",
+            "; bed_shape = 0x0,250x0,250x250,0x250",
+            "; retract_length = 0.8",
+            "; retract_speed = 35",
+            "; extrusion_width = 0.45",
+            "EXCLUDE_OBJECT_DEFINE NAME=cube CENTER=125,125 POLYGON=[[100,100],[150,100],[150,150],[100,150]]",
+            "M83",
+            "T0",
+        };
+        for (var i = 0; i < layers; i++)
+        {
+            var z = (0.2 * (i + 1)).ToString("0.##", CultureInfo.InvariantCulture);
+            lines.Add(";LAYER_CHANGE");
+            lines.Add($";Z:{z}");
+            lines.Add($"G1 Z{z} F9000");
+            lines.Add("G1 X100 Y100 F9000");
+            lines.Add("G1 X150 Y100 E50.0 F1500");
+            if (i == changeLayer)
+                lines.Add("T1");
+            lines.Add("G1 X150 Y150 E50.0 F1500");
+        }
         return lines.ToArray();
     }
 
