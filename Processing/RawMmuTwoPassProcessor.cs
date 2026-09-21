@@ -125,7 +125,8 @@ static class RawMmuTwoPassProcessor
                     output.AddRange(replace.Lines);
                 }
             }
-            else if (!scan.StrippedLineIndexes.Contains(i))
+            else if (!scan.StrippedLineIndexes.Contains(i)
+                     && !(injections is not null && injections.TryGetValue(i, out var removed) && removed.Kind == TowerInjectionKind.RemoveLine))
             {
                 output.Add(inputLines[i]);
 
@@ -168,6 +169,12 @@ static class RawMmuTwoPassProcessor
             output.Add($";  Total purge           = {stats.TotalPurgeMm.ToString("0.0", CultureInfo.InvariantCulture)} mm filament");
             output.Add($";  Total sustaining      = {stats.TotalSustainMm.ToString("0.0", CultureInfo.InvariantCulture)} mm filament");
             output.Add($";  Tower height          = {stats.FinalHeightMm.ToString("0.##", CultureInfo.InvariantCulture)} mm");
+            if (stats.Towers.Count == 0)
+                output.Add(";  No tower: every transition purges into the model (PrusaSlicer wipe into infill/object).");
+            if (stats.TransitionsWipedIntoModel > 0)
+                output.Add($";  Wipe into infill/obj. = {stats.TransitionsWipedIntoModel} transitions, {stats.WipedIntoModelMm.ToString("0.0", CultureInfo.InvariantCulture)} mm into the model, tower purge reduced by {stats.TowerPurgeSavedMm.ToString("0.0", CultureInfo.InvariantCulture)} mm");
+            if (stats.SlicerTowerRemovedMm > 0)
+                output.Add($";  Slicer tower removed  = {stats.SlicerTowerRemovedMm.ToString("0.0", CultureInfo.InvariantCulture)} mm of PrusaSlicer wipe tower extrusion dropped");
             output.Add(";  Filament used by tower (purge + sustaining), per input:");
             foreach (var kv in stats.WasteByToolMm.OrderBy(k => k.Key))
             {
@@ -176,6 +183,14 @@ static class RawMmuTwoPassProcessor
                     : "?";
                 var cm3 = FilamentMath.VolumeFromLength(kv.Value) / 1000.0;
                 output.Add($";    DI{kv.Key + 1} ({material}) = {kv.Value.ToString("0.0", CultureInfo.InvariantCulture)} mm ({cm3.ToString("0.00", CultureInfo.InvariantCulture)} cm3)");
+            }
+
+            // Tower waste against the model: the tail (EXTRAENDFILAMENT) is neither, so it is left out.
+            var towerWasteMm = stats.TotalPurgeMm + stats.TotalSustainMm;
+            var modelMm = Math.Max(0, scan.TotalEffectiveExtrusionMm - towerWasteMm);
+            if (modelMm > 0)
+            {
+                output.Add($";  Tower waste           = {towerWasteMm.ToString("0.0", CultureInfo.InvariantCulture)} mm = {(towerWasteMm / modelMm * 100).ToString("0.#", CultureInfo.InvariantCulture)}% of the model's {modelMm.ToString("0.0", CultureInfo.InvariantCulture)} mm ({(towerWasteMm / (modelMm + towerWasteMm) * 100).ToString("0.#", CultureInfo.InvariantCulture)}% of all filament printed)");
             }
         }
 

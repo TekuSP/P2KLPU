@@ -8,6 +8,9 @@ enum TowerInjectionKind
 
     /// <summary>The block is emitted after the original line (used at layer markers).</summary>
     InsertAfterLine,
+
+    /// <summary>The original line is dropped and nothing is emitted (model extrusion relocated into a purge visit).</summary>
+    RemoveLine,
 }
 
 /// <summary>

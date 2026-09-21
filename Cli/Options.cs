@@ -46,8 +46,15 @@ using System.Collections.Generic;
 /// <param name="TowerFirstLayerSpeedMmMin">Tower feedrate on the first layer (also used by the calibration squares); default -1 = the profile's first_layer_speed.</param>
 /// <param name="TowerMaxFlowMm3PerSec">Volumetric cap on tower extrusion (0 = none); default -1 = the profile's max volumetric speed (none set = uncapped).</param>
 /// <param name="TowerSustainLatticeLayers">How many sustaining layers directly below a purge layer carry the support lattice; sustaining layers further down print walls only. Default: all layers that have a purge somewhere above them (the lattice stops only where nothing above lands on it). 1 = only the layer the purge lands on; 0 = never.</param>
+/// <param name="TowerSustainAdaptive">Adaptive lattice (the tower's adaptive cubic): the lattice keeps <c>TowerSustainSpacingMm</c> within <c>TowerSustainDenseMm</c> of height below the next purge layer, doubles its spacing for the next zone (which spans that spacing in height), and doubles again beyond, up to <c>TowerSustainSpacingMaxMm</c>.</param>
+/// <param name="TowerSustainDenseMm">Height of the dense band under each purge layer (0 = the base lattice spacing).</param>
+/// <param name="TowerSustainSpacingMaxMm">Coarsest adaptive lattice spacing (0 = four times the base spacing).</param>
 /// <param name="CalibrateOffset">SPLICEOFFSET calibration print settings; null = normal processing.</param>
 /// <param name="CalibrateScale">Print the direct-reading scale beside each calibration square (off by default: the thin strokes are tedious to remove from the bed).</param>
+/// <param name="PurgeJunctionOnTower">Purging into the model: keep the color change (SPLICEOFFSET + 15 mm) on the tower instead of letting the relocated infill/object carry it. Default false: a transition whose model purge covers the whole tail needs no tower visit.</param>
+/// <param name="PurgeIntoInfill">TOWER mode: print the layer's internal infill that follows a toolchange right after the change, as purge, so the tower only takes the rest (P2KLPU-native wipe into infill).</param>
+/// <param name="PurgeIntoObjectNames">TOWER mode: objects (Klipper object names) whose extrusion following a toolchange is printed right after the change as purge (P2KLPU-native wipe into object; colors will mix on them).</param>
+/// <param name="ReplaceSlicerTower">TOWER mode: allow a PrusaSlicer wipe tower in the export — it is removed from the file and PrusaSlicer's own wipe-into-infill/object is honored. Off by default: a slicer tower next to the custom tower is an error.</param>
 /// <seealso cref="DirectiveParseResult"/>
 /// <seealso cref="RawMmuScanner"/>
 sealed record Options(
@@ -97,6 +104,9 @@ sealed record Options(
     int TowerSustainPerimeters = 2,
     double TowerSustainSpacingMm = 6,
     int TowerSustainLatticeLayers = int.MaxValue,
+    bool TowerSustainAdaptive = true,
+    double TowerSustainDenseMm = 0,
+    double TowerSustainSpacingMaxMm = 0,
     double TowerMaxFlowMm3PerSec = TowerProfileSpeeds.FromProfile,
     int TowerSpliceDwellMs = 0,
     double? TowerExtrusionWidthMm = null,
@@ -104,8 +114,15 @@ sealed record Options(
     IReadOnlyDictionary<TransitionKey, double>? PurgeOverridesByInput = null,
     IReadOnlyDictionary<MaterialTransitionKey, double>? PurgeOverridesByMaterial = null,
     OffsetCalibration? CalibrateOffset = null,
-    bool CalibrateScale = false)
+    bool CalibrateScale = false,
+    bool PurgeJunctionOnTower = false,
+    bool PurgeIntoInfill = false,
+    IReadOnlyList<string>? PurgeIntoObjectNames = null,
+    bool ReplaceSlicerTower = false)
 {
+    /// <summary>Objects whose extrusion may be printed as purge right after a toolchange (never null).</summary>
+    public IReadOnlyList<string> PurgeIntoObjects => PurgeIntoObjectNames ?? System.Array.Empty<string>();
+
     /// <summary>Per-input purge overrides (never null).</summary>
     public IReadOnlyDictionary<TransitionKey, double> PurgeByInput
         => PurgeOverridesByInput ?? System.Collections.Immutable.ImmutableDictionary<TransitionKey, double>.Empty;

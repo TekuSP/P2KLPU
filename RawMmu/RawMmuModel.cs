@@ -40,4 +40,6 @@ sealed record RawMmuScanResult(
     IReadOnlyList<LayerInfo> Layers,
     IReadOnlyList<ToolchangeContext> ToolchangeContexts,
     AxisAlignedBounds2D? ModelBounds,
-    double InjectedEffectiveEMm);
+    double InjectedEffectiveEMm,
+    bool SlicerTowerStripped = false,      // TOWER mode: PrusaSlicer's own wipe tower was removed from the file
+    double SlicerTowerStrippedMm = 0);     // ...and this much of its extrusion was dropped (never accounted)

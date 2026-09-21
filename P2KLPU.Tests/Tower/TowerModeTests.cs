@@ -413,6 +413,50 @@ public sealed class TowerModeTests
     }
 
     [Fact]
+    public void Planner_AdaptiveLattice_ThinsWithDistanceBelowTheNextPurgeLayer()
+    {
+        // Change on layer 100 (Z 20.2). Dense 6mm lattice within 6mm below it, 12mm in the zone
+        // below that (12mm tall), 24mm deeper down; TOWER_SUSTAIN_ADAPTIVE=0 keeps 6mm everywhere.
+        var lines = BuildTallFixture(layers: 120, changeLayer: 100);
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" } };
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 99, lattice 6mm", StringComparison.Ordinal));  // 0.2mm below
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 72, lattice 6mm", StringComparison.Ordinal));  // 5.6mm below
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 50, lattice 12mm", StringComparison.Ordinal)); // 10mm below
+        Assert.Contains(processed, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 5, lattice 24mm", StringComparison.Ordinal));  // 19mm below
+
+        var uniform = P2ppNetProcessor.ProcessLines(
+            lines, options with { TowerSustainAdaptive = false }, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+        Assert.Contains(uniform, l => l.StartsWith("; --- P2KLPU TOWER sustaining pass: layer 5, lattice 6mm", StringComparison.Ordinal));
+
+        // Adaptive spacing costs less than the uniform lattice (sustaining passes only), header untouched.
+        static double SustainE(IReadOnlyList<string> g)
+        {
+            var e = 0.0;
+            var inPass = false;
+            foreach (var l in g)
+            {
+                if (l.Contains("P2KLPU TOWER sustaining pass:", StringComparison.Ordinal)) { inPass = true; continue; }
+                if (l.Contains("sustaining pass end", StringComparison.Ordinal)) { inPass = false; continue; }
+                if (!inPass || !l.StartsWith("G1 ", StringComparison.Ordinal) || !l.Contains(" X", StringComparison.Ordinal)) continue;
+                var tok = l.Split(' ').FirstOrDefault(t => t.StartsWith('E'));
+                if (tok is not null) e += double.Parse(tok[1..], CultureInfo.InvariantCulture);
+            }
+            return e;
+        }
+        // On this ~40mm tower the two wall loops dominate a sustaining pass; the lattice itself shrinks by more than half.
+        Assert.True(SustainE(processed) < SustainE(uniform) * 0.9, $"adaptive lattice must save material ({SustainE(processed):0} vs {SustainE(uniform):0} mm)");
+        Assert.Equal(
+            processed.Count(l => l.StartsWith("O30 ", StringComparison.Ordinal)),
+            ParseHexShort(processed.Single(l => l.StartsWith("O26 ", StringComparison.Ordinal))));
+    }
+
+    [Fact]
     public void Planner_PrintsSustainLattice_WhereverAPurgeLiesAbove_AndCanRestrictIt()
     {
         // Change on layer 30. Default: every sustaining layer below it has a purge above, so all of
@@ -591,6 +635,12 @@ public sealed class TowerModeTests
         var towerIdx = console.IndexOf("Tower filament usage:", StringComparison.Ordinal);
         Assert.True(usageIdx >= 0 && towerIdx > usageIdx, "tower table must render after the input usage summary");
 
+        // ...closing with the waste ratio against the model, in both the console and the footer.
+        var wasteIdx = console.IndexOf("Tower waste:", StringComparison.Ordinal);
+        Assert.True(wasteIdx > towerIdx, "waste ratio must follow the tower table");
+        Assert.Contains("% of the model", console);
+        Assert.Contains(processed, l => l.StartsWith(";  Tower waste", StringComparison.Ordinal) && l.Contains("% of the model", StringComparison.Ordinal));
+
         // Header consistency over the injected timeline.
         var o30Lines = processed.Where(l => l.StartsWith("O30 ", StringComparison.Ordinal)).ToList();
         Assert.Equal(2, o30Lines.Count); // one transition + final splice
@@ -615,14 +665,459 @@ public sealed class TowerModeTests
     }
 
     [Fact]
-    public void TowerMode_WithSlicerWipeTowerEnabled_IsAnError()
+    public void TowerMode_WithSlicerWipeTowerInTheExport_IsAnError_UnlessReplacementIsRequested()
     {
-        var lines = BuildTowerFixture(wipeTowerFooter: 1);
+        var lines = BuildSlicerTowerFixture(wipedMm: 30, wipedType: "Internal infill");
         var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" } };
 
         var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Contains(analysis.Errors, e => e.Contains("PrusaSlicer's wipe tower", StringComparison.Ordinal) && e.Contains("TOWER_REPLACE_SLICER_TOWER", StringComparison.Ordinal));
 
-        Assert.Contains(analysis.Errors, e => e.Contains("wipe tower", StringComparison.OrdinalIgnoreCase) && e.Contains("DISABLED", StringComparison.Ordinal));
+        var replaced = GcodeAnalyzer.Analyze(lines, options with { ReplaceSlicerTower = true });
+        Assert.Empty(replaced.Errors);
+
+        // A footer flag alone (no tower in the file) is not an error.
+        var flagOnly = GcodeAnalyzer.Analyze(BuildTowerFixture(wipeTowerFooter: 1), options);
+        Assert.Empty(flagOnly.Errors);
+    }
+
+    [Fact]
+    public void PurgeIntoInfill_MovesTheLayersInternalInfill_IntoThePurgeVisit_AndShrinksTheTowerPurge()
+    {
+        // 30mm of internal infill follows the change on the same layer; pair purge is 100, so the
+        // tower takes 70. The infill lines move into the visit (object label re-applied), their
+        // sliced position and the travel run into them vanish; perimeters and solid infill stay.
+        var lines = BuildNativePurgeFixture(infillMm: 30, sacrificialMm: 0);
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" }, PurgeDefaultMm = 100, PurgeIntoInfill = true };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+        var stats = analysis.TowerStats!;
+        Assert.Equal(30, stats.WipedIntoModelMm, 1);
+        Assert.True(stats.TotalPurgeMm >= 70 - 0.01 && stats.TotalPurgeMm < 85, $"tower purge should be the 70mm remainder, got {stats.TotalPurgeMm:0.##}");
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var list = processed.ToList();
+        var visitStart = list.FindIndex(l => l.Contains("P2KLPU TOWER purge visit: layer 1", StringComparison.Ordinal));
+        var visitEnd = list.FindIndex(l => l.Contains("purge visit end", StringComparison.Ordinal));
+        Assert.True(visitStart >= 0 && visitEnd > visitStart);
+        var infillIdx = list.FindIndex(l => l.StartsWith("G1 X140 Y120 E15", StringComparison.Ordinal));
+        Assert.True(infillIdx > visitStart && infillIdx < visitEnd, "the infill must be printed inside the purge visit");
+        Assert.Equal(1, processed.Count(l => l.StartsWith("G1 X140 Y120 E15", StringComparison.Ordinal)));
+        Assert.Contains(processed, l => l.Contains("purge into infill of cube", StringComparison.Ordinal));
+        Assert.Equal(1, list.Skip(visitStart).Take(visitEnd - visitStart).Count(l => l == "EXCLUDE_OBJECT_START NAME=cube"));
+        Assert.DoesNotContain(processed, l => l.Equals("G1 X140 Y110", StringComparison.Ordinal));           // travel into the infill: gone with it
+        Assert.Contains(processed, l => l.StartsWith("G1 X150 Y105 E20", StringComparison.Ordinal));          // perimeter stays
+        Assert.Contains(processed, l => l.StartsWith("G1 X130 Y130 E10", StringComparison.Ordinal));          // solid infill stays
+        var perimeterIdx = list.FindIndex(l => l.StartsWith("G1 X150 Y105 E20", StringComparison.Ordinal));
+        Assert.True(perimeterIdx > visitEnd, "perimeters keep their sliced order after the visit");
+
+        AssertExtruderBalanceAndHeader(processed, options);
+    }
+
+    [Fact]
+    public void PurgeIntoObject_PrintsTheSacrificialObject_AsTheWholePurge_NoTowerNeeded()
+    {
+        // The object 'sac' (120mm) follows the change: more than the 100mm pair purge and more than
+        // SPLICEOFFSET + 15, so nothing is left for a tower and none is generated; the object's pass
+        // is printed right after the change, in place of the toolchange command.
+        var lines = BuildNativePurgeFixture(infillMm: 0, sacrificialMm: 120);
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" }, PurgeDefaultMm = 100, SpliceOffsetMm = 55, PurgeIntoObjectNames = new[] { "sac" } };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+        Assert.Empty(analysis.TowerStats!.Towers);
+        Assert.Equal(120, analysis.TowerStats.WipedIntoModelMm, 1);
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var list = processed.ToList();
+        var visitStart = list.FindIndex(l => l.Contains("into the model only", StringComparison.Ordinal));
+        var visitEnd = list.FindIndex(l => l.Contains("purge visit end", StringComparison.Ordinal));
+        var sacStart = list.FindIndex(l => l == "EXCLUDE_OBJECT_START NAME=sac");
+        Assert.True(visitStart >= 0 && sacStart > visitStart && sacStart < visitEnd, "the sacrificial object must be printed inside the visit");
+        Assert.Equal(1, processed.Count(l => l == "EXCLUDE_OBJECT_START NAME=sac"));
+        Assert.Equal(1, processed.Count(l => l.StartsWith("G1 X60 Y60 E60", StringComparison.Ordinal)));
+        Assert.DoesNotContain(processed, l => l.Contains("P2KLPU_Tower", StringComparison.Ordinal));
+        var perimeterIdx = list.FindIndex(l => l.StartsWith("G1 X150 Y105 E20", StringComparison.Ordinal));
+        Assert.True(perimeterIdx > visitEnd, "the cube's perimeters follow the visit");
+
+        AssertExtruderBalanceAndHeader(processed, options);
+    }
+
+    /// <summary>E-only moves net to zero and the header total equals the printed filament plus tail and offset.</summary>
+    private static void AssertExtruderBalanceAndHeader(IReadOnlyList<string> processed, Options options)
+    {
+        var eOnlyNet = 0.0;
+        var netAll = 0.0;
+        foreach (var l in processed)
+        {
+            if (!l.StartsWith("G1 ", StringComparison.Ordinal)) continue;
+            var tok = l.Split(' ').FirstOrDefault(t => t.StartsWith('E'));
+            if (tok is null) continue;
+            var e = double.Parse(tok[1..], CultureInfo.InvariantCulture);
+            netAll += e;
+            if (!l.Contains(" X", StringComparison.Ordinal) && !l.Contains(" Y", StringComparison.Ordinal))
+                eOnlyNet += e;
+        }
+        Assert.Equal(0, eOnlyNet, 2);
+        var o30Lines = processed.Where(l => l.StartsWith("O30 ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(o30Lines.Count, ParseHexShort(processed.Single(l => l.StartsWith("O26 ", StringComparison.Ordinal))));
+        var o1Total = ParseHexLong(processed.Single(l => l.StartsWith("O1 ", StringComparison.Ordinal)).Split(' ')[^1]);
+        Assert.Equal(netAll + options.ExtraEndFilamentMm + options.SpliceOffsetMm, DecodeO30Mm(o30Lines[^1]), 0.5);
+        Assert.Equal(DecodeO30Mm(o30Lines[^1]), o1Total, 0);
+    }
+
+    /// <summary>
+    /// A PrusaSlicer-style export WITHOUT a slicer tower: layer 1 changes T0->T1 between objects,
+    /// then the cube prints a perimeter, an internal-infill block (<paramref name="infillMm"/>), a
+    /// solid-infill block, and a second object 'sac' (<paramref name="sacrificialMm"/>) follows.
+    /// </summary>
+    private static string[] BuildNativePurgeFixture(double infillMm, double sacrificialMm)
+    {
+        var lines = new List<string>
+        {
+            "; gcode_flavor = klipper",
+            "; filament_type = PETG;PETG",
+            "; extruder_colour = #FF0000;#0000FF",
+            "; wipe_tower = 0",
+            "; bed_shape = 0x0,250x0,250x250,0x250",
+            "; retract_length = 0.8",
+            "; retract_speed = 35",
+            "; extrusion_width = 0.45",
+            "EXCLUDE_OBJECT_DEFINE NAME=cube CENTER=125,125 POLYGON=[[100,100],[150,100],[150,150],[100,150]]",
+            "EXCLUDE_OBJECT_DEFINE NAME=sac CENTER=65,65 POLYGON=[[50,50],[80,50],[80,80],[50,80]]",
+            "M83",
+            "T0",
+            ";LAYER_CHANGE",
+            ";Z:0.2",
+            "G1 Z0.2 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+        };
+        for (var i = 0; i < 6; i++)
+            lines.Add($"G1 X{100 + i * 8} Y100 E25.0 F1500");
+        lines.AddRange(new[]
+        {
+            "EXCLUDE_OBJECT_END NAME=cube",
+            ";LAYER_CHANGE",
+            ";Z:0.4",
+            "G1 Z0.4 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+            "G1 X150 Y100 E50.0 F1500",
+            "G1 E-0.8 F2100",
+            "EXCLUDE_OBJECT_END NAME=cube",
+            "M104 S230",
+            "T1",
+            "G1 Z1.0 F18000",
+            "G1 X150 Y105",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 F1500",
+            "G1 X150 Y105 E20.0",              // visible: stays in place
+            "G1 E-0.8 F2100",                  // travel run into the infill (goes with it)
+            "G1 Z1.0 F18000",
+            "G1 X140 Y110",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",
+            ";TYPE:Internal infill",
+            ";WIDTH:0.45",
+            "G1 F3000",
+        });
+        if (infillMm > 0)
+        {
+            lines.Add($"G1 X140 Y120 E{(infillMm / 2).ToString("0.###", CultureInfo.InvariantCulture)}");
+            lines.Add($"G1 X130 Y120 E{(infillMm / 2).ToString("0.###", CultureInfo.InvariantCulture)}");
+        }
+        lines.AddRange(new[]
+        {
+            "G1 E-0.8 F2100",                  // travel run into the solid infill (stays)
+            "G1 Z1.0 F18000",
+            "G1 X130 Y130",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",
+            ";TYPE:Solid infill",
+            "G1 X130 Y130 E10.0 F2000",        // visible: stays in place
+            "G1 E-0.8 F2100",
+            "EXCLUDE_OBJECT_END NAME=cube",
+            "G1 Z1.0 F18000",
+            "G1 X60 Y60",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",
+            "EXCLUDE_OBJECT_START NAME=sac",
+            ";TYPE:Perimeter",
+        });
+        if (sacrificialMm > 0)
+        {
+            lines.Add($"G1 X60 Y60 E{(sacrificialMm / 2).ToString("0.###", CultureInfo.InvariantCulture)} F1500");
+            lines.Add($"G1 X70 Y70 E{(sacrificialMm / 2).ToString("0.###", CultureInfo.InvariantCulture)}");
+        }
+        else
+        {
+            lines.Add("G1 X60 Y60 E5.0 F1500");
+        }
+        lines.AddRange(new[]
+        {
+            "G1 E-0.8 F2100",
+            "EXCLUDE_OBJECT_END NAME=sac",
+            ";LAYER_CHANGE",
+            ";Z:0.6",
+            "G1 Z0.6 F9000",
+            "G1 X100 Y100",
+            "G1 E0.8 F2100",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X150 Y150 E200.0 F1500",
+            "EXCLUDE_OBJECT_END NAME=cube",
+        });
+        return lines.ToArray();
+    }
+
+    [Fact]
+    public void TowerMode_RemovesSlicerWipeTower_AndPurgesOnlyTheRestOnItsOwnTower()
+    {
+        // PrusaSlicer wiped 30mm of the transition into the cube's infill; pair purge is 100, so the
+        // custom tower needs 70. The slicer's own tower (20mm purge + 10mm perimeter), its
+        // pressure-advance disable and the travel that led to it all vanish; the user's macros, the
+        // temperature command and the slicer's travel back to the model survive.
+        var lines = BuildSlicerTowerFixture(wipedMm: 30, wipedType: "Internal infill");
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" }, PurgeDefaultMm = 100, ReplaceSlicerTower = true };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+        var stats = analysis.TowerStats!;
+        Assert.Equal(30, stats.WipedIntoModelMm, 1);
+        Assert.Equal(1, stats.TransitionsWipedIntoModel);
+        Assert.True(stats.TotalPurgeMm >= 70 - 0.01 && stats.TotalPurgeMm < 85, $"tower purge should be the 70mm remainder, got {stats.TotalPurgeMm:0.##}");
+        Assert.Equal(30, stats.SlicerTowerRemovedMm, 1);
+        var placed = stats.Towers.Single();
+        Assert.Equal(20, placed.X, 3);   // where the slicer's tower stood (wipe_tower_x/y)
+        Assert.Equal(20, placed.Y, 3);
+        Assert.Contains(analysis.Warnings, w => w.Contains("wipe into infill/object", StringComparison.OrdinalIgnoreCase));
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        Assert.DoesNotContain(processed, l => l.Contains("CP TOOLCHANGE", StringComparison.Ordinal));
+        Assert.DoesNotContain(processed, l => l.StartsWith("G1 X60 Y21 E10.0", StringComparison.Ordinal));   // slicer tower purge
+        Assert.DoesNotContain(processed, l => l.StartsWith("G1 X20 Y20 E5.0", StringComparison.Ordinal));    // slicer tower perimeter
+        Assert.DoesNotContain(processed, l => l.Equals("G1 X20.5 Y20.5", StringComparison.Ordinal));        // travel to the slicer tower
+        Assert.DoesNotContain(processed, l => l.Equals("SET_PRESSURE_ADVANCE ADVANCE=0", StringComparison.Ordinal));
+        Assert.DoesNotContain(processed, l => l.Trim().Equals("T1", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(processed, l => l.Equals("G1 X150 Y150", StringComparison.Ordinal));               // travel back to the model
+        Assert.Contains(processed, l => l.Equals("SPOOL_CHANGE TOOL=1", StringComparison.Ordinal));
+        Assert.Contains(processed, l => l.Equals("M104 S230", StringComparison.Ordinal));
+        Assert.Contains(processed, l => l.StartsWith("G1 X150 Y110 E15", StringComparison.Ordinal));        // the wiped infill stays
+        Assert.Contains(processed, l => l.Contains("P2KLPU TOWER purge visit: layer 1", StringComparison.Ordinal));
+
+        // Header: the slicer tower's 30mm never existed for the Palette, the entry run's retract and
+        // unretract cancelled, so the T0 piece ends at layer-0 model (150) + tower base + 50.
+        var o30Lines = processed.Where(l => l.StartsWith("O30 ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, o30Lines.Count);
+        Assert.Equal(2, ParseHexShort(processed.Single(l => l.StartsWith("O26 ", StringComparison.Ordinal))));
+        Assert.Equal(200 + stats.TotalSustainMm, DecodeO30Mm(o30Lines[0]), 0.5);
+        var o1Total = ParseHexLong(processed.Single(l => l.StartsWith("O1 ", StringComparison.Ordinal)).Split(' ')[^1]);
+        Assert.Equal(DecodeO30Mm(o30Lines[1]), o1Total, 0);
+        Assert.All(analysis.Splices, s =>
+        {
+            var min = s.Index == 1 ? options.MinStartSpliceLengthMm : options.MinSpliceLengthMm;
+            Assert.True(s.LengthMm >= min - 0.01, $"splice #{s.Index} = {s.LengthMm:0.##}mm < {min}mm");
+        });
+    }
+
+    [Fact]
+    public void TowerMode_WipeIntoObjectCoveringTheWholeTail_NeedsNoTower_UnlessJunctionIsPinnedToTheTower()
+    {
+        // Wipe into object: 120mm of the object printed as purge right after the change, more than
+        // the 100mm pair purge and more than SPLICEOFFSET + 15. Default rule: the color change lands
+        // in that purge, nothing is left for a tower, none is generated. PURGE_JUNCTION=TOWER keeps
+        // the SPLICEOFFSET + 15mm margin on a tower.
+        var lines = BuildSlicerTowerFixture(wipedMm: 120, wipedType: "Perimeter");
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" }, PurgeDefaultMm = 100, SpliceOffsetMm = 55, ReplaceSlicerTower = true };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+        Assert.NotNull(analysis.TowerStats);
+        Assert.Empty(analysis.TowerStats!.Towers);
+        Assert.Equal(120, analysis.TowerStats.WipedIntoModelMm, 1);
+        Assert.Contains(analysis.Warnings, w => w.Contains("no tower generated", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("No tower", analysis.ToConsoleString("print.gcode", verbose: false));
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+        Assert.DoesNotContain(processed, l => l.Contains("P2KLPU_Tower", StringComparison.Ordinal));
+        Assert.DoesNotContain(processed, l => l.Contains("P2KLPU TOWER", StringComparison.Ordinal));
+        Assert.DoesNotContain(processed, l => l.Contains("CP TOOLCHANGE", StringComparison.Ordinal));
+        var o30Lines = processed.Where(l => l.StartsWith("O30 ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(2, o30Lines.Count);
+        Assert.Equal(200 + 55, DecodeO30Mm(o30Lines[0]), 0.5);   // no tower extrusion anywhere in the timeline
+        Assert.Equal(2, ParseHexShort(processed.Single(l => l.StartsWith("O26 ", StringComparison.Ordinal))));
+
+        var pinned = GcodeAnalyzer.Analyze(lines, options with { PurgeJunctionOnTower = true });
+        Assert.Empty(pinned.Errors);
+        Assert.Single(pinned.TowerStats!.Towers);
+        Assert.True(pinned.TowerStats.TotalPurgeMm >= 70 - 0.01 && pinned.TowerStats.TotalPurgeMm < 85, $"expected the SPLICEOFFSET+15 margin on the tower, got {pinned.TowerStats.TotalPurgeMm:0.##}");
+    }
+
+    [Fact]
+    public void TowerMode_SlicerTowerPrintedFirstOnALayer_KeepsTheExtruderRetractStateBalanced()
+    {
+        // The layer-end retract sits before ;LAYER_CHANGE, its unretract inside the (stripped) travel
+        // to the slicer tower; the slicer's travel back to the model retracts again. The output must
+        // not stack retracts: over the whole file the E-only moves net to zero, and the header still
+        // reconciles with what is printed.
+        var lines = BuildSlicerTowerFixture(wipedMm: 30, wipedType: "Internal infill", towerFirstOnLayer: true);
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" }, PurgeDefaultMm = 100, ReplaceSlicerTower = true };
+
+        var analysis = GcodeAnalyzer.Analyze(lines, options);
+        Assert.Empty(analysis.Errors);
+
+        var processed = P2ppNetProcessor.ProcessLines(
+            lines, options, "print.gcode", "print.gcode",
+            new DateTime(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var eOnlyNet = 0.0;
+        var netAll = 0.0;
+        foreach (var l in processed)
+        {
+            if (!l.StartsWith("G1 ", StringComparison.Ordinal)) continue;
+            var tok = l.Split(' ').FirstOrDefault(t => t.StartsWith('E'));
+            if (tok is null) continue;
+            var e = double.Parse(tok[1..], CultureInfo.InvariantCulture);
+            netAll += e;
+            if (!l.Contains(" X", StringComparison.Ordinal) && !l.Contains(" Y", StringComparison.Ordinal))
+                eOnlyNet += e;
+        }
+        Assert.Equal(0, eOnlyNet, 2);
+
+        var o30Lines = processed.Where(l => l.StartsWith("O30 ", StringComparison.Ordinal)).ToList();
+        var o1Total = ParseHexLong(processed.Single(l => l.StartsWith("O1 ", StringComparison.Ordinal)).Split(' ')[^1]);
+        Assert.Equal(netAll + options.ExtraEndFilamentMm + options.SpliceOffsetMm, DecodeO30Mm(o30Lines[^1]), 0.5);
+        Assert.Equal(DecodeO30Mm(o30Lines[^1]), o1Total, 0);
+    }
+
+    /// <summary>
+    /// A PrusaSlicer-style export with the slicer's wipe tower ENABLED and wipe into infill/object:
+    /// layer 1 changes T0->T1 inside a "; CP TOOLCHANGE" block that sits in a ";TYPE:Wipe tower"
+    /// region (the travel to the tower before it, purge lines and a tower perimeter inside, the travel
+    /// back to the model after it), followed by extrusion PrusaSlicer used as purge and closed with
+    /// "; PURGING FINISHED".
+    /// </summary>
+    private static string[] BuildSlicerTowerFixture(double wipedMm, string wipedType, bool towerFirstOnLayer = false)
+    {
+        if (towerFirstOnLayer)
+            return BuildSlicerTowerFirstFixture(wipedMm, wipedType);
+
+        var lines = new List<string>
+        {
+            "; gcode_flavor = klipper",
+            "; filament_type = PETG;PETG",
+            "; extruder_colour = #FF0000;#0000FF",
+            "; wipe_tower = 1",
+            "; wipe_tower_x = 20",
+            "; wipe_tower_y = 20",
+            "; wipe_tower_rotation_angle = 0",
+            "; bed_shape = 0x0,250x0,250x250,0x250",
+            "; retract_length = 0.8",
+            "; retract_speed = 35",
+            "; extrusion_width = 0.45",
+            "EXCLUDE_OBJECT_DEFINE NAME=cube CENTER=125,125 POLYGON=[[100,100],[150,100],[150,150],[100,150]]",
+            "M83",
+            "T0",
+            ";LAYER_CHANGE",
+            ";Z:0.2",
+            "G1 Z0.2 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+        };
+        for (var i = 0; i < 6; i++)
+            lines.Add($"G1 X{100 + i * 8} Y100 E25.0 F1500");
+        lines.AddRange(new[]
+        {
+            "EXCLUDE_OBJECT_END NAME=cube",
+            ";LAYER_CHANGE",
+            ";Z:0.4",
+            "G1 Z0.4 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+            "G1 X150 Y100 E50.0 F1500",
+            "G1 E-0.8 F2100",                 // travel to the slicer tower: retract
+            "EXCLUDE_OBJECT_END NAME=cube",
+            "M204 S3000",
+            "G1 Z1.4 F18000",                 // hop
+            "G1 X20.5 Y20.5",                 // travel
+            "G1 Z0.4",
+            "G1 E0.8 F2100",                  // unretract
+            ";HEIGHT:0.2",
+            ";TYPE:Wipe tower",
+            ";WIDTH:0.5",
+            ";--------------------",
+            "; CP TOOLCHANGE START",
+            "; toolchange #1",
+            "; material : PETG -> PETG",
+            ";--------------------",
+            "M220 S100",
+            "; CP TOOLCHANGE UNLOAD",
+            "G1 X21 Y21",
+            "SET_PRESSURE_ADVANCE ADVANCE=0",
+            "M400",
+            "M104 S230",
+            "SPOOL_CHANGE TOOL=1",
+            "T1",
+            "M106 S128",
+            "; CP TOOLCHANGE WIPE",
+            "G1 X60 Y21 E10.0 F2400",        // slicer tower purge
+            "G1 X21 Y21.5 E10.0",
+            "G1 F18000",
+            "M400",
+            "G92 E0",
+            "; CP TOOLCHANGE END",
+            ";------------------",
+            "",
+            "G1 X60 Y20 F7200",
+            ";TYPE:Wipe tower",
+            "G1 X20 Y20 E5.0 F7500",         // slicer tower perimeter
+            "G1 Y60 E5.0",
+            "",
+            "M204 S2000",
+            "G1 E-0.8 F2100",                // travel back to the model: retract
+            "M204 S3000",
+            "G1 Z1.4 F18000",
+            "G1 X150 Y150",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            $";TYPE:{wipedType}",
+            $"G1 X150 Y110 E{(wipedMm / 2).ToString("0.###", CultureInfo.InvariantCulture)} F3000",   // printed as purge by PrusaSlicer
+            $"G1 X140 Y110 E{(wipedMm / 2).ToString("0.###", CultureInfo.InvariantCulture)}",
+            "; PURGING FINISHED",
+            ";TYPE:Perimeter",
+            "G1 X150 Y150 E50.0 F1500",
+            "EXCLUDE_OBJECT_END NAME=cube",
+            ";LAYER_CHANGE",
+            ";Z:0.6",
+            "G1 Z0.6 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+            "G1 X150 Y150 E200.0 F1500",
+            "EXCLUDE_OBJECT_END NAME=cube",
+        });
+        return lines.ToArray();
     }
 
     // ---------- Fixture / helpers ----------
@@ -730,6 +1225,56 @@ public sealed class TowerModeTests
         return lines.ToArray();
     }
 
+    [Fact]
+    public void Planner_SizesTower_ForTheThinnestLayerThatPurges_WithVariableLayerHeight()
+    {
+        // 0.2mm layers, then a 0.05mm layer carrying a 120mm purge: the tower must be sized for
+        // that thin layer, so nothing runs out of fill and every splice meets the minimum.
+        var lines = new List<string>
+        {
+            "; gcode_flavor = klipper",
+            "; filament_type = PETG;PETG",
+            "; extruder_colour = #FF0000;#0000FF",
+            "; wipe_tower = 0",
+            "; bed_shape = 0x0,350x0,350x350,0x350",
+            "; retract_length = 0.8",
+            "; retract_speed = 35",
+            "; extrusion_width = 0.45",
+            "EXCLUDE_OBJECT_DEFINE NAME=cube CENTER=175,175 POLYGON=[[150,150],[200,150],[200,200],[150,200]]",
+            "M83",
+            "T0",
+        };
+        var z = 0.0;
+        for (var i = 0; i < 12; i++)
+        {
+            z += i < 10 ? 0.2 : 0.05;
+            var zs = z.ToString("0.###", CultureInfo.InvariantCulture);
+            lines.Add(";LAYER_CHANGE");
+            lines.Add($";Z:{zs}");
+            lines.Add($"G1 Z{zs} F9000");
+            lines.Add("G1 X150 Y160 F9000");
+            lines.Add("G1 X200 Y160 E60.0 F1500");
+            if (i == 10)
+                lines.Add("T1"); // the change sits on the first 0.05mm layer
+            lines.Add("G1 X200 Y190 E60.0 F1500");
+        }
+        var options = TowerOptions() with { FilamentTypes = new[] { "PETG", "PETG" }, PurgeDefaultMm = 120 };
+
+        var analysis = GcodeAnalyzer.Analyze(lines.ToArray(), options);
+
+        Assert.Empty(analysis.Errors);
+        Assert.DoesNotContain(analysis.Warnings, w => w.Contains("ran out of fill", StringComparison.Ordinal));
+        Assert.Contains(analysis.Warnings, w => w.Contains("thinnest layer with a color change is 0.05mm", StringComparison.Ordinal));
+        var tower = analysis.TowerStats!.Towers.Single();
+        // 120mm at 0.05mm needs ~5800mm² plus headroom: far bigger than the ~40mm square a 0.2mm layer would get.
+        Assert.True(tower.WidthMm * tower.DepthMm > 5000, $"tower {tower.WidthMm:0.#}x{tower.DepthMm:0.#} too small for a 0.05mm purge layer");
+        Assert.All(analysis.Splices, s =>
+        {
+            var min = s.Index == 1 ? options.MinStartSpliceLengthMm : options.MinSpliceLengthMm;
+            Assert.True(s.LengthMm >= min - 0.01, $"splice #{s.Index} = {s.LengthMm:0.##}mm < {min}mm");
+        });
+    }
+
     /// <summary>A 0.2mm-layer print of the given height with one T0->T1 change mid-way through <paramref name="changeLayer"/>.</summary>
     private static string[] BuildTallFixture(int layers, int changeLayer)
     {
@@ -759,6 +1304,94 @@ public sealed class TowerModeTests
                 lines.Add("T1");
             lines.Add("G1 X150 Y150 E50.0 F1500");
         }
+        return lines.ToArray();
+    }
+
+    /// <summary>
+    /// Like <see cref="BuildSlicerTowerFixture"/>, but the slicer tower is the first thing printed on
+    /// layer 1: the previous layer ends with a retract, the layer change follows, then the travel to
+    /// the tower with the unretract, the toolchange block, and only then the model.
+    /// </summary>
+    private static string[] BuildSlicerTowerFirstFixture(double wipedMm, string wipedType)
+    {
+        var lines = new List<string>
+        {
+            "; gcode_flavor = klipper",
+            "; filament_type = PETG;PETG",
+            "; extruder_colour = #FF0000;#0000FF",
+            "; wipe_tower = 1",
+            "; wipe_tower_x = 20",
+            "; wipe_tower_y = 20",
+            "; wipe_tower_rotation_angle = 0",
+            "; bed_shape = 0x0,250x0,250x250,0x250",
+            "; retract_length = 0.8",
+            "; retract_speed = 35",
+            "; extrusion_width = 0.45",
+            "EXCLUDE_OBJECT_DEFINE NAME=cube CENTER=125,125 POLYGON=[[100,100],[150,100],[150,150],[100,150]]",
+            "M83",
+            "T0",
+            ";LAYER_CHANGE",
+            ";Z:0.2",
+            "G1 Z0.2 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+        };
+        for (var i = 0; i < 6; i++)
+            lines.Add($"G1 X{100 + i * 8} Y100 E25.0 F1500");
+        lines.AddRange(new[]
+        {
+            "G1 E-0.8 F2100",                 // layer-end retract (before the layer marker)
+            "EXCLUDE_OBJECT_END NAME=cube",
+            ";LAYER_CHANGE",
+            ";Z:0.4",
+            "G1 Z1.4 F18000",                 // travel to the slicer tower: hop
+            "G1 X20.5 Y20.5",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",                  // unretract at the tower
+            ";HEIGHT:0.2",
+            ";TYPE:Wipe tower",
+            ";WIDTH:0.5",
+            "; CP TOOLCHANGE START",
+            "; toolchange #1",
+            "M220 S100",
+            "; CP TOOLCHANGE UNLOAD",
+            "G1 X21 Y21",
+            "SET_PRESSURE_ADVANCE ADVANCE=0",
+            "M104 S230",
+            "T1",
+            "; CP TOOLCHANGE WIPE",
+            "G1 X60 Y21 E10.0 F2400",        // slicer tower purge
+            "G1 X21 Y21.5 E10.0",
+            "G92 E0",
+            "; CP TOOLCHANGE END",
+            "G1 X60 Y20 F7200",
+            ";TYPE:Wipe tower",
+            "G1 X20 Y20 E5.0 F7500",         // slicer tower perimeter
+            "G1 Y60 E5.0",
+            "M204 S2000",
+            "G1 E-0.8 F2100",                // travel back to the model: retract (would stack)
+            "G1 Z1.4 F18000",
+            "G1 X150 Y150",
+            "G1 Z0.4",
+            "G1 E0.8 F2100",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            $";TYPE:{wipedType}",
+            $"G1 X150 Y110 E{(wipedMm / 2).ToString("0.###", CultureInfo.InvariantCulture)} F3000",
+            $"G1 X140 Y110 E{(wipedMm / 2).ToString("0.###", CultureInfo.InvariantCulture)}",
+            "; PURGING FINISHED",
+            ";TYPE:Perimeter",
+            "G1 X150 Y150 E50.0 F1500",
+            "EXCLUDE_OBJECT_END NAME=cube",
+            ";LAYER_CHANGE",
+            ";Z:0.6",
+            "G1 Z0.6 F9000",
+            "EXCLUDE_OBJECT_START NAME=cube",
+            ";TYPE:Perimeter",
+            "G1 X100 Y100 F9000",
+            "G1 X150 Y150 E200.0 F1500",
+            "EXCLUDE_OBJECT_END NAME=cube",
+        });
         return lines.ToArray();
     }
 

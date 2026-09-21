@@ -217,7 +217,8 @@ sealed class TowerVisitEmitter
         double? resumeZ,
         double? lastFeedrate,
         double speedMmMin,
-        int dwellMsBeforePrint = 0)
+        int dwellMsBeforePrint = 0,
+        double? exitDepth = null)
     {
         var gc = new List<string>(64) { header };
 
@@ -294,7 +295,10 @@ sealed class TowerVisitEmitter
             gc.Add($"G1 Z{F(resumeZ.Value)} F{ZTravelF}");
 
         // 4. Restore the entry retract depth exactly (net E of all E-only moves in this block = 0).
-        var toRestore = depth - entryDepth;
+        // Back to the retract state the print expects; a caller that continues with its own
+        // travel (relocated model blocks) asks for the retracted state instead and accounts for
+        // the difference (entryDepth - exitDepth) itself.
+        var toRestore = depth - (exitDepth ?? entryDepth);
         if (toRestore > 0.01)
             gc.Add($"G1 E{F(toRestore)} F{F0(_deretractF)}");
         else if (toRestore < -0.01)

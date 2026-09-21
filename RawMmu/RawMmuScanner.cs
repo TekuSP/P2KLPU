@@ -98,6 +98,24 @@ static class RawMmuScanner
         double? lastFeedrate = null;
         var retractDepth = 0.0;
 
+        // PrusaSlicer wipe tower removal (TOWER mode). The slicer's tower lives in ";TYPE:Wipe tower"
+        // regions (toolchange blocks, sparse-layer grids, perimeters, brim). Its extrusion is dropped
+        // and never accounted; travel/retract moves inside a region are deferred until the region
+        // ends, and only the run that leads the head back to the model survives. The travel that
+        // led the head TO the tower is stripped retroactively when the region starts.
+        var stripSlicerTower = options.TowerMode && options.ReplaceSlicerTower;
+        var inSlicerTowerRegion = false;
+        var sawSlicerTowerRegion = false;
+        var slicerTowerStrippedMm = 0.0;
+        var slicerTowerBarrierIndex = -1;   // last dropped tower extrusion / toolchange in the region: nothing before it survives
+        var slicerTowerRegionLines = new List<(int Index, double Delta, bool IsEOnly)>();
+
+        // Wipe into infill/object: PrusaSlicer prints the purge it routed into the model right after
+        // the toolchange and closes it with "; PURGING FINISHED"; the filament between the two is
+        // attributed to that toolchange.
+        var pendingWipeContextIndex = -1;
+        var pendingWipeEStartMm = 0.0;
+
         var layers = new List<LayerInfo>();
         var pendingLayerChangeLine = -1;
         var toolchangeContexts = new List<ToolchangeContext>();
@@ -155,6 +173,11 @@ static class RawMmuScanner
                 RetractDepthMm: retractDepth,
                 EffectiveEMm: totalEffectiveExtrusion));
 
+            // Inside the slicer's tower region the toolchange is the hard boundary: nothing deferred
+            // before it can be the run back to the model.
+            if (inSlicerTowerRegion)
+                slicerTowerBarrierIndex = lineIndex;
+
             if (currentTool >= 0 && newTool != currentTool)
             {
                 // Only enable heuristic toolchange window if we are not inside an explicit toolchange block.
@@ -191,6 +214,184 @@ static class RawMmuScanner
                 RetractDepthAtMarkerMm: retractDepth));
         }
 
+        // Accounting for a move that stays in the file (delta already resolved to a net value).
+        void AccountKeptMove(int lineIndex, double delta, bool isEOnly, bool hasX, bool hasY, double xVal, double yVal, bool isTowerMove)
+        {
+            // Retract-state tracking (kept E-only moves are retract/unretract).
+            if (isEOnly)
+            {
+                if (delta < 0)
+                    retractDepth += -delta;
+                else if (delta > 0)
+                    retractDepth = Math.Max(0, retractDepth - delta);
+            }
+
+            if (delta == 0)
+                return;
+
+            totalEffectiveExtrusion += delta;
+
+            if (inToolchange && isEOnly)
+                keptToolchangeEOnlyExtrusion += delta;
+
+            if (isTowerMove)
+                towerEffectiveExtrusion += delta;
+            else
+                modelEffectiveExtrusion += delta;
+
+            if (delta > 0 && hasX && hasY)
+            {
+                // Arc endpoints slightly underestimate the true bounds (arc bulge); acceptable for diagnostics.
+                if (isTowerMove)
+                    towerBounds = Grow(towerBounds, xVal, yVal);
+                else
+                    modelBounds = Grow(modelBounds, xVal, yVal);
+            }
+
+            if (delta > 0 && pingPlanner.ShouldInsertPing(totalEffectiveExtrusion))
+                RecordPing(lineIndex);
+        }
+
+        // Comments that belong to the slicer's tower G-code.
+        static bool IsSlicerTowerComment(string trimmedComment)
+            => trimmedComment.StartsWith(";HEIGHT:", StringComparison.OrdinalIgnoreCase)
+               || trimmedComment.StartsWith(";WIDTH:", StringComparison.OrdinalIgnoreCase)
+               || trimmedComment.StartsWith(";--", StringComparison.Ordinal)
+               || trimmedComment.StartsWith("; CP ", StringComparison.OrdinalIgnoreCase)
+               || trimmedComment.StartsWith("; toolchange #", StringComparison.OrdinalIgnoreCase)
+               || trimmedComment.StartsWith("; material :", StringComparison.OrdinalIgnoreCase)
+               || trimmedComment.StartsWith("; layer #", StringComparison.OrdinalIgnoreCase);
+
+        // Commands the slicer's tower code emits around its moves (feedrate/accel/wait/resets, and
+        // the pressure-advance disable PrusaSlicer never restores). Deferred like travels: they
+        // survive only inside the run that leads back to the model.
+        static bool IsSlicerTowerAuxCommand(string code)
+        {
+            if (code.StartsWith("M204", StringComparison.OrdinalIgnoreCase)
+                || code.StartsWith("M400", StringComparison.OrdinalIgnoreCase)
+                || code.StartsWith("M220", StringComparison.OrdinalIgnoreCase)
+                || code.StartsWith("G92", StringComparison.OrdinalIgnoreCase)
+                || code.Equals("G4", StringComparison.OrdinalIgnoreCase)
+                || code.StartsWith("G4 ", StringComparison.OrdinalIgnoreCase)
+                || code.StartsWith("M900 K0", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            return code.Trim().Equals("SET_PRESSURE_ADVANCE ADVANCE=0", StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Reverses the accounting of an entry-run move that turned out to belong to the slicer's tower.
+        void UndoAccountedEntryMove(double delta, bool isEOnly)
+        {
+            if (delta > 0)
+                totalPositiveExtrusion -= delta;
+            if (isEOnly)
+            {
+                if (delta < 0)
+                    retractDepth = Math.Max(0, retractDepth - (-delta));
+                else if (delta > 0)
+                    retractDepth += delta;
+            }
+            if (delta == 0)
+                return;
+            totalEffectiveExtrusion -= delta;
+            modelEffectiveExtrusion -= delta;
+        }
+
+        void BeginSlicerTowerRegion(int markerIndex)
+        {
+            inSlicerTowerRegion = true;
+            sawSlicerTowerRegion = true;
+            inWipeTower = true;
+            slicerTowerRegionLines.Clear();
+            slicerTowerBarrierIndex = -1;
+
+            // Entry run: the retract / hop / travel / unretract that brought the head to the slicer's
+            // tower. Walk back to the model's last extrusion and drop it (object labels stay).
+            for (var j = markerIndex - 1; j >= 0; j--)
+            {
+                var rawJ = lines[j];
+                if (string.IsNullOrWhiteSpace(rawJ))
+                    continue;
+                var tj = rawJ.Trim();
+                if (tj.StartsWith(";", StringComparison.Ordinal))
+                {
+                    if (IsSlicerTowerComment(tj))
+                    {
+                        strippedLineIndexes.Add(j);
+                        continue;
+                    }
+                    break;
+                }
+
+                var codeJ = StripComment(rawJ);
+                if (codeJ.Length == 0)
+                    continue;
+                if (codeJ.StartsWith("EXCLUDE_OBJECT_", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (codeJ.StartsWith("M204", StringComparison.OrdinalIgnoreCase) || codeJ.StartsWith("M400", StringComparison.OrdinalIgnoreCase))
+                {
+                    strippedLineIndexes.Add(j);
+                    continue;
+                }
+                if (IsExtrusionMoveCommand(codeJ, out _))
+                {
+                    var hasEj = TryGetParam(codeJ, 'E', out var ej);
+                    var hasXYj = HasParam(codeJ, 'X') || HasParam(codeJ, 'Y');
+                    if (hasEj && ej > 0 && hasXYj)
+                        break;   // the model's last extrusion
+                    if (hasEj && !extrusionAbsolute && !strippedLineIndexes.Contains(j))
+                        UndoAccountedEntryMove(ej, IsEOnlyMove(codeJ));
+                    strippedLineIndexes.Add(j);
+                    continue;
+                }
+                break;
+            }
+        }
+
+        void EndSlicerTowerRegion()
+        {
+            if (!inSlicerTowerRegion)
+                return;
+            inSlicerTowerRegion = false;
+            inWipeTower = false;
+
+            // Everything up to the last dropped extrusion / toolchange goes; the trailing run
+            // (retract, hop, travel back to the model, unretract) stays and is accounted now.
+            var keepFrom = 0;
+            while (keepFrom < slicerTowerRegionLines.Count && slicerTowerRegionLines[keepFrom].Index < slicerTowerBarrierIndex)
+                keepFrom++;
+            for (var k = 0; k < keepFrom; k++)
+                strippedLineIndexes.Add(slicerTowerRegionLines[k].Index);
+            for (var k = keepFrom; k < slicerTowerRegionLines.Count; k++)
+            {
+                var (idx, delta, isEOnly) = slicerTowerRegionLines[k];
+
+                // The run back to the model must leave the extruder in the state the model expects,
+                // starting from the state the head is actually in. When the slicer printed its tower
+                // first on a layer, the layer-end retract sits before the layer marker (kept) while
+                // its unretract was part of the stripped entry run: a second retract here would
+                // stack on it and the extruder would drift 0.75 mm per layer. So a retract is
+                // dropped when already retracted that far, and an unretract when already primed.
+                if (isEOnly && delta < 0 && retractDepth >= -delta - 0.01)
+                {
+                    strippedLineIndexes.Add(idx);
+                    continue;
+                }
+                if (isEOnly && delta > 0 && retractDepth <= 0.01)
+                {
+                    strippedLineIndexes.Add(idx);
+                    continue;
+                }
+
+                if (delta > 0)
+                    totalPositiveExtrusion += delta;
+                AccountKeptMove(idx, delta, isEOnly, hasX: false, hasY: false, 0, 0, isTowerMove: false);
+            }
+            slicerTowerRegionLines.Clear();
+            slicerTowerBarrierIndex = -1;
+        }
+
         void ProcessLine(int i)
         {
             var raw = lines[i];
@@ -206,7 +407,19 @@ static class RawMmuScanner
                 if (TryParsePrusaType(trimmed, out var prusaType))
                 {
                     sawTypeMarkers = true;
-                    inWipeTower = prusaType is PrusaType.WipeTower or PrusaType.PrimeTower;
+                    var isTowerType = prusaType is PrusaType.WipeTower or PrusaType.PrimeTower;
+                    inWipeTower = isTowerType;
+                    if (stripSlicerTower)
+                    {
+                        if (isTowerType)
+                        {
+                            if (!inSlicerTowerRegion)
+                                BeginSlicerTowerRegion(i);
+                            strippedLineIndexes.Add(i);
+                            return;
+                        }
+                        EndSlicerTowerRegion();
+                    }
                 }
 
                 // Calibration marker: the next splice uses this junction offset instead of SPLICEOFFSET.
@@ -220,6 +433,8 @@ static class RawMmuScanner
                 // Layer detection: ;LAYER_CHANGE then ;Z:<z> (or the next Z move).
                 if (trimmed.Equals(";LAYER_CHANGE", StringComparison.OrdinalIgnoreCase))
                 {
+                    EndSlicerTowerRegion();
+                    pendingWipeContextIndex = -1;
                     pendingLayerChangeLine = i;
                     return;
                 }
@@ -230,6 +445,20 @@ static class RawMmuScanner
                     return;
                 }
 
+                // PrusaSlicer closes the purge it routed into the model (wipe into infill/object)
+                // with this marker; what was extruded since the toolchange is that transition's share.
+                if (trimmed.Equals("; PURGING FINISHED", StringComparison.OrdinalIgnoreCase))
+                {
+                    EndSlicerTowerRegion();
+                    if (pendingWipeContextIndex >= 0 && pendingWipeContextIndex < toolchangeContexts.Count)
+                    {
+                        var wiped = Math.Max(0, totalEffectiveExtrusion - pendingWipeEStartMm);
+                        toolchangeContexts[pendingWipeContextIndex] = toolchangeContexts[pendingWipeContextIndex] with { WipedIntoModelMm = wiped };
+                    }
+                    pendingWipeContextIndex = -1;
+                    return;
+                }
+
                 // Prefer explicit toolchange markers when present:
                 //   ; CP TOOLCHANGE START / END      ; TOOLCHANGE START / END
                 if (trimmed.Contains("TOOLCHANGE START", StringComparison.OrdinalIgnoreCase))
@@ -237,13 +466,37 @@ static class RawMmuScanner
                     inToolchange = true;
                     inExplicitToolchangeBlock = true;
                     sawExplicitToolchangeBlocks = true;
+                    // Exports without ;TYPE markers: the toolchange block itself is the tower region.
+                    if (stripSlicerTower && !inSlicerTowerRegion && !sawTypeMarkers)
+                        BeginSlicerTowerRegion(i);
                 }
                 else if (trimmed.Contains("TOOLCHANGE END", StringComparison.OrdinalIgnoreCase))
                 {
                     inToolchange = false;
                     inExplicitToolchangeBlock = false;
                     toolchangeLinesLeft = 0;
+                    if (inSlicerTowerRegion && !sawTypeMarkers)
+                    {
+                        strippedLineIndexes.Add(i);
+                        EndSlicerTowerRegion();
+                        return;
+                    }
                 }
+                else if (stripSlicerTower && !sawTypeMarkers && trimmed.StartsWith("; CP ", StringComparison.OrdinalIgnoreCase))
+                {
+                    // "; CP EMPTY GRID START/END", "; CP PRIMING START/END", brim markers.
+                    if (!inSlicerTowerRegion && trimmed.EndsWith(" START", StringComparison.OrdinalIgnoreCase))
+                        BeginSlicerTowerRegion(i);
+                    else if (inSlicerTowerRegion && trimmed.EndsWith(" END", StringComparison.OrdinalIgnoreCase))
+                    {
+                        strippedLineIndexes.Add(i);
+                        EndSlicerTowerRegion();
+                        return;
+                    }
+                }
+
+                if (inSlicerTowerRegion && IsSlicerTowerComment(trimmed))
+                    strippedLineIndexes.Add(i);
 
                 // Comments don't carry extrusion, so we can skip them after state update.
                 return;
@@ -252,6 +505,22 @@ static class RawMmuScanner
             var code = StripComment(raw);
             if (code.Length == 0)
                 return;
+
+            if (inSlicerTowerRegion)
+            {
+                if (code.StartsWith("EXCLUDE_OBJECT_START", StringComparison.OrdinalIgnoreCase))
+                {
+                    // The model resumes: the region ends, the travel run that led here survives.
+                    EndSlicerTowerRegion();
+                }
+                else if (IsSlicerTowerAuxCommand(code))
+                {
+                    if (code.StartsWith("G92", StringComparison.OrdinalIgnoreCase) && TryGetParam(code, 'E', out var eReset))
+                        lastAbsoluteE = eReset;
+                    slicerTowerRegionLines.Add((i, 0.0, false));
+                    return;
+                }
+            }
 
             if (code.StartsWith("M82", StringComparison.OrdinalIgnoreCase))
             {
@@ -319,6 +588,24 @@ static class RawMmuScanner
                         lastAbsoluteE = e;
                     }
 
+                    var isEOnly = IsEOnlyMove(code);
+
+                    // Slicer tower being removed: its extrusion is dropped and never accounted; retract,
+                    // unretract and wipe moves are deferred until the region ends (only the run that
+                    // leads back to the model survives, see EndSlicerTowerRegion).
+                    if (inSlicerTowerRegion)
+                    {
+                        if (delta > 0 && (hasX || hasY))
+                        {
+                            strippedLineIndexes.Add(i);
+                            slicerTowerStrippedMm += delta;
+                            slicerTowerBarrierIndex = i;
+                            return;
+                        }
+                        slicerTowerRegionLines.Add((i, delta, isEOnly));
+                        return;
+                    }
+
                     // Positive-only accumulator kept as a diagnostic (includes toolchange logistics).
                     if (delta > 0)
                         totalPositiveExtrusion += delta;
@@ -327,7 +614,6 @@ static class RawMmuScanner
                     // Small E-only moves (retract/unretract pairs) are kept so the printed file still
                     // protects against ooze; with net accounting they cancel out.
                     // This preserves purge tower geometry which has X/Y.
-                    var isEOnly = IsEOnlyMove(code);
                     if (inToolchange && isEOnly && ShouldStripEOnly(delta, options.MmuEOnlyStripThresholdMm))
                     {
                         strippedLineIndexes.Add(i);
@@ -336,46 +622,19 @@ static class RawMmuScanner
                         return;
                     }
 
-                    // Retract-state tracking (kept E-only moves are retract/unretract).
-                    if (isEOnly)
-                    {
-                        if (delta < 0)
-                            retractDepth += -delta;
-                        else if (delta > 0)
-                            retractDepth = Math.Max(0, retractDepth - delta);
-                    }
-
-                    if (delta != 0)
-                    {
-                        totalEffectiveExtrusion += delta;
-
-                        if (inToolchange && isEOnly)
-                            keptToolchangeEOnlyExtrusion += delta;
-
-                        var isTowerMove = IsTowerExtrusionMove(
-                            sawTypeMarkers: sawTypeMarkers,
-                            inWipeTower: inWipeTower,
-                            inExplicitToolchangeBlock: inExplicitToolchangeBlock,
-                            inToolchange: inToolchange,
-                            code: code);
-
-                        if (isTowerMove)
-                            towerEffectiveExtrusion += delta;
-                        else
-                            modelEffectiveExtrusion += delta;
-
-                        if (delta > 0 && hasX && hasY)
-                        {
-                            // Arc endpoints slightly underestimate the true bounds (arc bulge); acceptable for diagnostics.
-                            if (isTowerMove)
-                                towerBounds = Grow(towerBounds, xVal, yVal);
-                            else
-                                modelBounds = Grow(modelBounds, xVal, yVal);
-                        }
-
-                        if (delta > 0 && pingPlanner.ShouldInsertPing(totalEffectiveExtrusion))
-                            RecordPing(i);
-                    }
+                    var isTowerMove = IsTowerExtrusionMove(
+                        sawTypeMarkers: sawTypeMarkers,
+                        inWipeTower: inWipeTower,
+                        inExplicitToolchangeBlock: inExplicitToolchangeBlock,
+                        inToolchange: inToolchange,
+                        code: code);
+                    AccountKeptMove(i, delta, isEOnly, hasX, hasY, xVal, yVal, isTowerMove);
+                }
+                else if (inSlicerTowerRegion)
+                {
+                    // Travel inside the slicer's tower region: deferred like the moves above.
+                    slicerTowerRegionLines.Add((i, 0.0, false));
+                    return;
                 }
             }
 
@@ -392,6 +651,14 @@ static class RawMmuScanner
 
         for (var i = 0; i < lines.Length; i++)
         {
+            // Model extrusion relocated into a purge visit: the original line is neither printed nor
+            // accounted here; its filament is part of the visit's lump at the toolchange.
+            if (injections is not null && injections.TryGetValue(i, out var removed) && removed.Kind == TowerInjectionKind.RemoveLine)
+            {
+                strippedLineIndexes.Add(i);
+                continue;
+            }
+
             ProcessLine(i);
 
             // Generated tower blocks are accounted at their anchor line so every downstream
@@ -409,7 +676,17 @@ static class RawMmuScanner
                 if (pingPlanner.ShouldInsertPing(totalEffectiveExtrusion))
                     RecordPing(i);
             }
+
+            // What PrusaSlicer purges into the model after this toolchange starts here (after any
+            // generated purge block), and ends at its "; PURGING FINISHED" marker.
+            if (toolchangeCommandLines.ContainsKey(i))
+            {
+                pendingWipeContextIndex = toolchangeContexts.Count - 1;
+                pendingWipeEStartMm = totalEffectiveExtrusion;
+            }
         }
+
+        EndSlicerTowerRegion();
 
         // Final end-of-print splice: the Palette needs a splice entry covering the last tool's
         // segment through the end of the print (plus the extra end-of-print filament tail).
@@ -463,7 +740,9 @@ static class RawMmuScanner
             Layers: layers,
             ToolchangeContexts: toolchangeContexts,
             ModelBounds: modelBounds,
-            InjectedEffectiveEMm: injectedEffectiveExtrusion);
+            InjectedEffectiveEMm: injectedEffectiveExtrusion,
+            SlicerTowerStripped: sawSlicerTowerRegion,
+            SlicerTowerStrippedMm: slicerTowerStrippedMm);
     }
 
     private static AxisAlignedBounds2D Grow(AxisAlignedBounds2D? bounds, double x, double y)
@@ -489,7 +768,7 @@ static class RawMmuScanner
     /// Matches linear (G0/G1) and arc (G2/G3) moves by exact first token, so probe/home style
     /// commands like G28/G29/G32 or firmware retract G10/G11 are never mistaken for moves.
     /// </summary>
-    private static bool IsExtrusionMoveCommand(string code, out bool isArc)
+    internal static bool IsExtrusionMoveCommand(string code, out bool isArc)
     {
         isArc = false;
         if (code.Length < 2)
@@ -573,14 +852,14 @@ static class RawMmuScanner
         return true;
     }
 
-    private static bool IsEOnlyMove(string line)
+    internal static bool IsEOnlyMove(string line)
     {
         // Very conservative: a move with E but no X/Y/Z.
         // This keeps purge tower geometry intact.
         return HasParam(line, 'E') && !HasParam(line, 'X') && !HasParam(line, 'Y') && !HasParam(line, 'Z');
     }
 
-    private static bool HasParam(string gcode, char param)
+    internal static bool HasParam(string gcode, char param)
     {
         var tokens = gcode.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         foreach (var t in tokens)
@@ -592,13 +871,13 @@ static class RawMmuScanner
         return false;
     }
 
-    private static string StripComment(string line)
+    internal static string StripComment(string line)
     {
         var idx = line.IndexOf(';');
         return idx >= 0 ? line[..idx].Trim() : line.Trim();
     }
 
-    private static bool TryGetParam(string gcode, char param, out double value)
+    internal static bool TryGetParam(string gcode, char param, out double value)
     {
         value = 0;
         var tokens = gcode.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -616,7 +895,7 @@ static class RawMmuScanner
         return false;
     }
 
-    private static bool TryParseToolChange(string line, out int tool)
+    internal static bool TryParseToolChange(string line, out int tool)
     {
         tool = -1;
         line = line.Trim();

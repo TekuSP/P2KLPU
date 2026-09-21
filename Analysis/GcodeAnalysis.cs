@@ -371,15 +371,39 @@ sealed record GcodeAnalysis(
                     + "   Height "
                     + C(tower.FinalHeightMm.ToString("0.##", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
             }
-            sb.AppendLine(
-                "  Purge layers "
-                + C(tower.PurgeLayers.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
-                + "   Sustaining layers "
-                + C(tower.SustainLayers.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
-                + "   Total purge "
-                + C(tower.TotalPurgeMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor)
-                + "   Sustaining "
-                + C(tower.TotalSustainMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
+            if (tower.Towers.Count == 0)
+            {
+                sb.AppendLine("  " + C("No tower: every transition purges into the model (PrusaSlicer wipe into infill/object).", FgGreen, useColor));
+            }
+            else
+            {
+                sb.AppendLine(
+                    "  Purge layers "
+                    + C(tower.PurgeLayers.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
+                    + "   Sustaining layers "
+                    + C(tower.SustainLayers.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
+                    + "   Total purge "
+                    + C(tower.TotalPurgeMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor)
+                    + "   Sustaining "
+                    + C(tower.TotalSustainMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
+            }
+            if (tower.TransitionsWipedIntoModel > 0)
+            {
+                sb.AppendLine(
+                    "  Wipe into infill/object: "
+                    + C(tower.TransitionsWipedIntoModel.ToString(CultureInfo.InvariantCulture), FgGreen, useColor)
+                    + " transitions purge "
+                    + C(tower.WipedIntoModelMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor)
+                    + " into the model, tower purge reduced by "
+                    + C(tower.TowerPurgeSavedMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor));
+            }
+            if (tower.SlicerTowerRemovedMm > 0)
+            {
+                sb.AppendLine(
+                    "  PrusaSlicer wipe tower removed: "
+                    + C(tower.SlicerTowerRemovedMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgYellow, useColor)
+                    + " of its extrusion dropped from the file");
+            }
             sb.AppendLine();
 
             var towerRows = tower.WasteByToolMm
@@ -436,6 +460,47 @@ sealed record GcodeAnalysis(
                         + C(row.VolumeCm3.ToString("0.00", CultureInfo.InvariantCulture).PadLeft(volumeWidth), FgGreen, useColor));
                 }
 
+                sb.AppendLine();
+            }
+
+            // Closing line: how much the tower costs against the model, as numbers and as a bar.
+            // The end-of-print tail (EXTRAENDFILAMENT) is neither model nor tower and is left out.
+            var towerWasteMm = tower.TotalPurgeMm + tower.TotalSustainMm;
+            var modelMm = TotalEffectiveExtrusionMm.HasValue
+                ? Math.Max(0, TotalEffectiveExtrusionMm.Value - towerWasteMm)
+                : ModelEffectiveExtrusionMm ?? 0;
+            if (modelMm > 0 && towerWasteMm > 0)
+            {
+                var ofModel = towerWasteMm / modelMm * 100;
+                var share = towerWasteMm / (modelMm + towerWasteMm);
+                sb.AppendLine(
+                    C("Tower waste: ", Bold + FgCyan, useColor)
+                    + C(towerWasteMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgYellow, useColor)
+                    + " = "
+                    + C(ofModel.ToString("0.#", CultureInfo.InvariantCulture) + "%", Bold + FgYellow, useColor)
+                    + " of the model's "
+                    + C(modelMm.ToString("0.0", CultureInfo.InvariantCulture) + " mm", FgGreen, useColor)
+                    + $" ({(share * 100).ToString("0.#", CultureInfo.InvariantCulture)}% of all filament printed)");
+
+                const int barWidth = 40;
+                var towerCells = (int)Math.Round(share * barWidth);
+                towerCells = Math.Clamp(towerCells, towerWasteMm > 0 ? 1 : 0, barWidth - (modelMm > 0 ? 1 : 0));
+                var modelCells = barWidth - towerCells;
+                var modelBar = useColor ? C(new string('█', modelCells), FgGreen, useColor) : new string('#', modelCells);
+                var towerBar = useColor ? C(new string('█', towerCells), FgYellow, useColor) : new string('=', towerCells);
+                sb.AppendLine(
+                    "  [" + modelBar + towerBar + "]  "
+                    + C($"model {((1 - share) * 100).ToString("0.#", CultureInfo.InvariantCulture)}%", FgGreen, useColor)
+                    + "  |  "
+                    + C($"tower {(share * 100).ToString("0.#", CultureInfo.InvariantCulture)}%", FgYellow, useColor));
+                if (tower.TotalSustainMm > tower.TotalPurgeMm)
+                {
+                    var sustainShare = tower.TotalSustainMm / towerWasteMm * 100;
+                    sb.AppendLine(
+                        "  "
+                        + C($"{sustainShare.ToString("0", CultureInfo.InvariantCulture)}% of the tower is sustaining passes (walls + lattice on layers without a color change), not purge. "
+                            + "TOWER_SUSTAIN_LATTICE_LAYERS=1 and TOWER_SUSTAIN_PERIMETERS=1 remove most of it.", FgYellow, useColor));
+                }
                 sb.AppendLine();
             }
         }

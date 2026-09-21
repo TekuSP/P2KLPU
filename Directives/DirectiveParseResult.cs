@@ -61,6 +61,9 @@ sealed record DirectiveParseResult(
         var towerSustainPerimeters = options.TowerSustainPerimeters;
         var towerSustainSpacing = options.TowerSustainSpacingMm;
         var towerSustainLatticeLayers = options.TowerSustainLatticeLayers;
+        var towerSustainAdaptive = options.TowerSustainAdaptive;
+        var towerSustainDense = options.TowerSustainDenseMm;
+        var towerSustainSpacingMax = options.TowerSustainSpacingMaxMm;
         var towerMaxFlow = options.TowerMaxFlowMm3PerSec;
         var towerSpliceDwell = options.TowerSpliceDwellMs;
         var towerExtrusionWidth = options.TowerExtrusionWidthMm;
@@ -69,6 +72,10 @@ sealed record DirectiveParseResult(
         var purgeByMaterial = new Dictionary<MaterialTransitionKey, double>(options.PurgeByMaterial);
         var calibrateOffset = options.CalibrateOffset;
         var calibrateScale = options.CalibrateScale;
+        var purgeJunctionOnTower = options.PurgeJunctionOnTower;
+        var purgeIntoInfill = options.PurgeIntoInfill;
+        var purgeIntoObjects = new List<string>(options.PurgeIntoObjects);
+        var replaceSlicerTower = options.ReplaceSlicerTower;
         var algoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.AlgorithmOverrides);
         var diAlgoOverrides = new Dictionary<TransitionKey, SpliceAlgorithm>(options.DiAlgorithmOverrides);
         var materialAlgoOverrides = new Dictionary<MaterialTransitionKey, SpliceAlgorithm>(options.MaterialAlgorithmOverrides);
@@ -416,6 +423,30 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            // Adaptive lattice: dense (TOWER_SUSTAIN_SPACING) within TOWER_SUSTAIN_DENSE mm of height
+            // below the next purge layer, twice as coarse in the zone below that, four times beyond
+            // (capped by TOWER_SUSTAIN_SPACING_MAX). TOWER_SUSTAIN_ADAPTIVE=0 keeps one spacing everywhere.
+            if (key is "TOWER_SUSTAIN_ADAPTIVE")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    towerSustainAdaptive = b;
+                continue;
+            }
+
+            if (key is "TOWER_SUSTAIN_DENSE")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm >= 0)
+                    towerSustainDense = mm;
+                continue;
+            }
+
+            if (key is "TOWER_SUSTAIN_SPACING_MAX")
+            {
+                if (double.TryParse(d.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var mm) && mm >= 0)
+                    towerSustainSpacingMax = mm;
+                continue;
+            }
+
             // Volumetric cap on tower extrusion (mm³/s): keeps consumption during Palette splice
             // creation below what the buffer can cover (buffer error 121 protection). 0 disables.
             if (key is "TOWER_MAX_FLOW")
@@ -491,6 +522,48 @@ sealed record DirectiveParseResult(
                 continue;
             }
 
+            // Where the color change may land when PrusaSlicer wipes into infill/object:
+            //   ;P2KLPU PURGE_JUNCTION=MODEL   (default; INFILL is accepted too) - in the wiped infill when it is long enough
+            //   ;P2KLPU PURGE_JUNCTION=TOWER   - always on the tower (SPLICEOFFSET + 15 mm stays there)
+            // P2KLPU-native wipe into infill / object (TOWER mode, no slicer tower needed):
+            //   ;P2KLPU PURGE_INTO_INFILL=1
+            //   ;P2KLPU PURGE_INTO_OBJECT=<Klipper object name>   (repeatable)
+            if (key is "PURGE_INTO_INFILL")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    purgeIntoInfill = b;
+                continue;
+            }
+
+            if (key is "PURGE_INTO_OBJECT" or "PURGE_INTO_OBJECTS")
+            {
+                foreach (var name in d.Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    var n = name.Trim('\'', '"');
+                    if (n.Length > 0 && !purgeIntoObjects.Exists(x => x.Equals(n, StringComparison.OrdinalIgnoreCase)))
+                        purgeIntoObjects.Add(n);
+                }
+                continue;
+            }
+
+            // Allow (and remove) a PrusaSlicer wipe tower in the export instead of erroring out.
+            if (key is "TOWER_REPLACE_SLICER_TOWER")
+            {
+                if (TryParseBool(d.Value, out var b))
+                    replaceSlicerTower = b;
+                continue;
+            }
+
+            if (key is "PURGE_JUNCTION")
+            {
+                var v = d.Value.Trim();
+                if (v.Equals("TOWER", StringComparison.OrdinalIgnoreCase))
+                    purgeJunctionOnTower = true;
+                else if (v.Equals("MODEL", StringComparison.OrdinalIgnoreCase) || v.Equals("INFILL", StringComparison.OrdinalIgnoreCase) || v.Equals("OBJECT", StringComparison.OrdinalIgnoreCase))
+                    purgeJunctionOnTower = false;
+                continue;
+            }
+
             // Per-pair purge lengths (filament mm):
             //   ;P2KLPU PURGE_PETG_PLA=120
             //   ;P2KLPU PURGE_DI1_DI2=90   (also IN1/IN2 tokens)
@@ -558,6 +631,9 @@ sealed record DirectiveParseResult(
             TowerSustainPerimeters = towerSustainPerimeters,
             TowerSustainSpacingMm = towerSustainSpacing,
             TowerSustainLatticeLayers = towerSustainLatticeLayers,
+            TowerSustainAdaptive = towerSustainAdaptive,
+            TowerSustainDenseMm = towerSustainDense,
+            TowerSustainSpacingMaxMm = towerSustainSpacingMax,
             TowerMaxFlowMm3PerSec = towerMaxFlow,
             TowerSpliceDwellMs = towerSpliceDwell,
             TowerExtrusionWidthMm = towerExtrusionWidth,
@@ -566,6 +642,10 @@ sealed record DirectiveParseResult(
             PurgeOverridesByMaterial = purgeByMaterial,
             CalibrateOffset = calibrateOffset,
             CalibrateScale = calibrateScale,
+            PurgeJunctionOnTower = purgeJunctionOnTower,
+            PurgeIntoInfill = purgeIntoInfill,
+            PurgeIntoObjectNames = purgeIntoObjects,
+            ReplaceSlicerTower = replaceSlicerTower,
             AlgorithmOverrides = algoOverrides,
             DiAlgorithmOverrides = diAlgoOverrides,
             MaterialAlgorithmOverrides = materialAlgoOverrides

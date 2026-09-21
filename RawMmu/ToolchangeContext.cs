@@ -14,4 +14,5 @@ sealed record ToolchangeContext(
     double? ResumeZmm,
     double? LastFeedrate,  // last F seen on a move
     double RetractDepthMm, // net retraction at this point (0 = primed)
-    double EffectiveEMm);  // effective extrusion position at the toolchange (this scan's timeline)
+    double EffectiveEMm,   // effective extrusion position at the toolchange (this scan's timeline)
+    double WipedIntoModelMm = 0); // filament PrusaSlicer purged into the model right after this change (wipe into infill/object; up to its "; PURGING FINISHED" marker)

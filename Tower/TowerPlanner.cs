@@ -19,7 +19,11 @@ sealed record TowerPlanStats(
     double TotalSustainMm,
     double FinalHeightMm,
     IReadOnlyDictionary<int, double> WasteByToolMm,
-    IReadOnlyList<TowerPlacement> Towers);
+    IReadOnlyList<TowerPlacement> Towers,
+    double WipedIntoModelMm = 0,          // PrusaSlicer wipe into infill/object: filament purged into the model
+    int TransitionsWipedIntoModel = 0,
+    double TowerPurgeSavedMm = 0,         // tower purge the wiped infill made unnecessary
+    double SlicerTowerRemovedMm = 0);     // extrusion of the slicer's own wipe tower dropped from the file
 
 /// <summary>Result of planning the custom tower(s): injections for the scanner/replay, findings, and stats.</summary>
 sealed record TowerPlanResult(
@@ -82,9 +86,6 @@ static class TowerPlanner
         var errors = new List<string>();
         var warnings = new List<string>();
 
-        if (SlicerConfigDetector.TryReadPrusaInt(lines, "wipe_tower") == 1)
-            errors.Add("TOWER mode requires the PrusaSlicer wipe tower to be DISABLED (wipe_tower=0); the print would otherwise get two towers.");
-
         if (scan.ExtrusionIsAbsolute)
             errors.Add("TOWER mode requires relative extrusion (M83).");
 
@@ -111,6 +112,21 @@ static class TowerPlanner
         if (errors.Count > 0)
             return TowerPlanResult.Empty(errors, warnings);
 
+        // A PrusaSlicer wipe tower in the export would mean two towers. Unless P2KLPU is told to
+        // replace it (TOWER_REPLACE_SLICER_TOWER=1, in which case the scanner has removed it and
+        // PrusaSlicer's own wipe-into-infill/object is honored), that is an error.
+        var slicerTowerPresent = scan.SlicerTowerStripped
+            || scan.SawExplicitToolchangeBlocks
+            || (scan.TowerDetection == TowerDetectionMethod.TypeMarkers && scan.TowerEffectiveExtrusionMm > 0);
+        if (slicerTowerPresent && !options.ReplaceSlicerTower)
+        {
+            errors.Add(
+                "TOWER mode found PrusaSlicer's wipe tower in the export. Disable it in PrusaSlicer (Print Settings -> Multiple extruders -> Wipe tower); "
+                + "P2KLPU purges into infill or objects on its own (PURGE_INTO_INFILL=1 / PURGE_INTO_OBJECT=<name>). "
+                + "To keep PrusaSlicer's own wipe-into-infill planning instead, add ';P2KLPU TOWER_REPLACE_SLICER_TOWER=1' and P2KLPU removes the slicer's tower from the file.");
+            return TowerPlanResult.Empty(errors, warnings);
+        }
+
         // Geometry/flow parameters.
         var ew = options.TowerExtrusionWidthMm
             ?? NullIfNonPositive(SlicerConfigDetector.TryReadPrusaDouble(lines, "extrusion_width"))
@@ -125,14 +141,87 @@ static class TowerPlanner
         var retractSpeed = NullIfNonPositive(SlicerConfigDetector.TryReadPrusaDouble(lines, "retract_speed")) ?? 35;
         var deretractSpeed = NullIfNonPositive(SlicerConfigDetector.TryReadPrusaDouble(lines, "deretract_speed")) ?? retractSpeed;
 
+        // Purge into the model (P2KLPU-native wipe into infill / object): the layer's internal infill,
+        // or a sacrificial object's extrusion, that follows the toolchange is printed right after it
+        // as purge, so the tower only takes what the model cannot. Their original lines are dropped.
+        var relocations = PurgeIntoModelScanner.Collect(lines, scan, options);
+        var relocatedMm = relocations.ToDictionary(kv => kv.Key, kv => kv.Value.Sum(b => b.NetEMm));
+        var injections = new Dictionary<int, TowerInjection>();
+        foreach (var blocks in relocations.Values)
+        {
+            foreach (var block in blocks)
+            {
+                foreach (var k in block.RemovedLines)
+                    injections[k] = new TowerInjection(TowerInjectionKind.RemoveLine, Array.Empty<string>(), 0);
+            }
+        }
+
         // Purge demand.
-        var (demands, demandWarnings) = PurgeDemandPlanner.Plan(scan, options);
+        var (demands, demandWarnings) = PurgeDemandPlanner.Plan(scan, options, relocatedMm);
         warnings.AddRange(demandWarnings);
 
-        var demandsByLayer = demands
+        // Transitions whose model purge covers everything still need their blocks moved: the
+        // toolchange command is replaced by a relocation-only visit.
+        double LayerZOf(int layerIndex) => scan.Layers[Math.Clamp(layerIndex, 0, scan.Layers.Count - 1)].Z;
+        foreach (var d in demands)
+        {
+            if (d.PurgeMm > 0.5 || !relocations.TryGetValue(d.Change.LineIndex, out var blocksHere))
+                continue;
+            var gc = new List<string>
+            {
+                $"; --- P2KLPU TOWER purge visit: layer {Math.Max(0, d.Change.LayerIndex)}, T{d.Change.FromTool} -> T{d.Change.ToTool}, into the model only",
+            };
+            var printed = PurgeIntoModelEmitter.Append(
+                gc, lines, blocksHere, LayerZOf(d.Change.LayerIndex),
+                startDepthMm: d.Change.RetractDepthMm,
+                retractLenMm: retractLen.Value, retractF: retractSpeed * 60, deretractF: deretractSpeed * 60,
+                resumeX: scan.SlicerTowerStripped ? null : d.Change.ResumeXmm,
+                resumeY: scan.SlicerTowerStripped ? null : d.Change.ResumeYmm,
+                resumeZ: scan.SlicerTowerStripped ? null : d.Change.ResumeZmm,
+                entryDepthMm: d.Change.RetractDepthMm,
+                lastFeedrate: d.Change.LastFeedrate,
+                speedMmMin: options.TowerSpeedMmMin);
+            gc.Add("; --- P2KLPU TOWER purge visit end");
+            injections[d.Change.LineIndex] = new TowerInjection(TowerInjectionKind.ReplaceLine, gc, printed);
+        }
+
+        // Wipe into infill/object: what goes into the model comes off the tower.
+        var wipedMm = demands.Sum(d => d.WipedIntoModelMm);
+        var wipedCount = demands.Count(d => d.WipedIntoModelMm > 0.5);
+        var savedMm = demands.Sum(d => Math.Max(0, d.PairPurgeMm - d.PurgeMm));
+        if (scan.SlicerTowerStripped)
+        {
+            warnings.Add(
+                $"TOWER: PrusaSlicer's wipe tower was removed from the file ({scan.SlicerTowerStrippedMm:0} mm of its extrusion dropped, "
+                + "together with its pressure-advance disable); the custom tower replaces it.");
+        }
+        if (wipedCount > 0)
+        {
+            warnings.Add(
+                $"TOWER: wipe into infill/object: {wipedCount} of {demands.Count} transitions purge {wipedMm:0} mm into the model, "
+                + $"tower purge reduced by {savedMm:0} mm"
+                + (options.PurgeJunctionOnTower
+                    ? " (PURGE_JUNCTION=TOWER: the color change itself stays on the tower)."
+                    : " (the color change lands in the wiped infill when it is long enough; PURGE_JUNCTION=TOWER keeps it on the tower)."));
+        }
+
+        var activeDemands = demands.Where(d => d.PurgeMm > 0.5).ToList();
+        if (activeDemands.Count == 0)
+        {
+            warnings.Add($"TOWER: every transition is purged into the model (wipe into infill/object, {wipedMm:0} mm); no tower generated.");
+            return new TowerPlanResult(
+                injections,
+                errors,
+                warnings,
+                Array.Empty<string>(),
+                new TowerPlanStats(0, 0, 0, 0, 0, 0, 0, 0, 0, new Dictionary<int, double>(), Array.Empty<TowerPlacement>(),
+                    WipedIntoModelMm: wipedMm, TransitionsWipedIntoModel: wipedCount, TowerPurgeSavedMm: savedMm, SlicerTowerRemovedMm: scan.SlicerTowerStrippedMm));
+        }
+
+        var demandsByLayer = activeDemands
             .GroupBy(d => Math.Max(0, d.Change.LayerIndex))
             .ToDictionary(g => g.Key, g => g.OrderBy(d => d.Change.LineIndex).ToList());
-        if (demands.Any(d => d.Change.LayerIndex < 0))
+        if (activeDemands.Any(d => d.Change.LayerIndex < 0))
             warnings.Add("TOWER: a tool transition occurs before the first layer marker; treating it as layer 0.");
 
         var lastToolchangeLayer = demandsByLayer.Keys.Max();
@@ -145,11 +234,28 @@ static class TowerPlanner
             return TowerPlanResult.Empty(errors, warnings);
         }
 
-        var worstLayerDemand = demandsByLayer.Values.Max(list => list.Sum(d => d.PurgeMm));
+        // A tower layer holds (area × layer height) of filament, so the binding constraint is the
+        // purge layer with the largest demand PER MILLIMETRE OF LAYER HEIGHT, not the largest demand.
+        // With variable layer height a 0.04mm layer holds a quarter of what a 0.15mm layer holds.
+        // Size at the thinnest purge layer's height for the demand that layer would need there.
+        const double minSizingHeight = 0.02;
+        double LayerHeightOf(int layerIdx)
+        {
+            var idx = Math.Clamp(layerIdx, 0, scan.Layers.Count - 1);
+            return Math.Max(minSizingHeight, scan.Layers[idx].HeightMm);
+        }
+        var minLayerHeight = demandsByLayer.Keys.Min(LayerHeightOf);
+        var worstDemandPerHeight = demandsByLayer.Max(kv => kv.Value.Sum(d => d.PurgeMm) / LayerHeightOf(kv.Key));
+        var worstLayerDemand = worstDemandPerHeight * minLayerHeight;   // demand normalized to the sizing height
         var sizingDemand = worstLayerDemand * CapacityHeadroomFactor + CapacityHeadroomMm;
-        var minLayerHeight = scan.Layers.Take(lastToolchangeLayer + 1).Min(l => l.HeightMm);
-        if (minLayerHeight <= 0.04)
-            minLayerHeight = 0.2;
+        var thinnestPurgeLayer = demandsByLayer.Keys.OrderBy(LayerHeightOf).First();
+        if (minLayerHeight < 0.1)
+        {
+            warnings.Add(
+                $"TOWER: the thinnest layer with a color change is {LayerHeightOf(thinnestPurgeLayer):0.###}mm (layer {thinnestPurgeLayer}); "
+                + $"a tower layer that thin holds only {LayerHeightOf(thinnestPurgeLayer) / 2.405 * 1000:0.#}mm of filament per 1000mm2 of footprint, "
+                + "so the footprint is sized for it. Thicker layers, smaller purges, or fewer color changes per layer shrink the tower.");
+        }
 
         // Objects/bed for placement.
         var namedObjects = ObjectOutlineScanner.Scan(lines);
@@ -174,12 +280,30 @@ static class TowerPlanner
         var brimInflate = (options.TowerBrimLoops + 1) * ew;
         var objectClearance = TowerPlacementSolver.DefaultClearanceMm;
 
-        var placements = ResolveTowerPlacements(options, sizingDemand, minLayerHeight, ew, brimInflate, objectClearance, bed, objectBounds, errors);
+        // When the slicer's tower was removed, its spot is free by construction (the user reserved
+        // it in the slicer): try to put the custom tower there before searching the bed.
+        (double X, double Y)? preferredCorner = null;
+        if (scan.SlicerTowerStripped)
+        {
+            var wx = SlicerConfigDetector.TryReadPrusaDouble(lines, "wipe_tower_x");
+            var wy = SlicerConfigDetector.TryReadPrusaDouble(lines, "wipe_tower_y");
+            var rotation = SlicerConfigDetector.TryReadPrusaDouble(lines, "wipe_tower_rotation_angle") ?? 0;
+            if (wx.HasValue && wy.HasValue && Math.Abs(rotation) < 1e-6)
+                preferredCorner = (wx.Value, wy.Value);
+        }
+
+        var placements = ResolveTowerPlacements(options, sizingDemand, minLayerHeight, ew, brimInflate, objectClearance, bed, objectBounds, preferredCorner, errors);
         if (placements is null || errors.Count > 0)
             return TowerPlanResult.Empty(errors, warnings);
 
         if (placements.Count == 1)
-            warnings.Add($"TOWER: placed at X={placements[0].X:0.#} Y={placements[0].Y:0.#} (footprint {placements[0].WidthMm:0.#}x{placements[0].DepthMm:0.#}mm).");
+        {
+            var atSlicerSpot = preferredCorner.HasValue
+                && Math.Abs(placements[0].X - preferredCorner.Value.X) < 1e-6
+                && Math.Abs(placements[0].Y - preferredCorner.Value.Y) < 1e-6;
+            warnings.Add($"TOWER: placed at X={placements[0].X:0.#} Y={placements[0].Y:0.#} (footprint {placements[0].WidthMm:0.#}x{placements[0].DepthMm:0.#}mm)"
+                + (atSlicerSpot ? " where PrusaSlicer's wipe tower stood." : "."));
+        }
         else
             warnings.Add($"TOWER: no single footprint fit — using {placements.Count} towers: "
                 + string.Join("; ", placements.Select(p => $"{p.Name} at X={p.X:0.#} Y={p.Y:0.#} ({p.WidthMm:0.#}x{p.DepthMm:0.#}mm)")));
@@ -197,8 +321,6 @@ static class TowerPlanner
             };
         }).ToList();
         var emitter = new TowerVisitEmitter(retractLen.Value, retractSpeed * 60, deretractSpeed * 60);
-
-        var injections = new Dictionary<int, TowerInjection>();
         var purgeLayers = 0;
         var sustainLayers = 0;
         var totalPurge = 0.0;
@@ -269,12 +391,35 @@ static class TowerPlanner
             }
         }
 
-        bool LatticeNeededOn(int layerIdx, int towerIdx)
+        // Lattice spacing for a sustaining layer of one tower (0 = walls only). Adaptive by default,
+        // like adaptive cubic infill: the surface that needs support is the next purge layer above,
+        // so the lattice stays dense within TOWER_SUSTAIN_DENSE mm of height below it, doubles its
+        // spacing for the next zone (which spans that spacing in height), and doubles again beyond,
+        // up to TOWER_SUSTAIN_SPACING_MAX. Deep inside the tower a line then bridges up to that
+        // spacing between the perpendicular lines below it, which is harmless there.
+        double LatticeSpacingOn(int layerIdx, int towerIdx)
         {
-            if (options.TowerSustainSpacingMm <= 0 || options.TowerSustainLatticeLayers <= 0)
-                return false;
+            var baseSpacing = options.TowerSustainSpacingMm;
+            if (baseSpacing <= 0 || options.TowerSustainLatticeLayers <= 0)
+                return 0;
             var nextPurge = purgeLayersByTower[towerIdx].FirstOrDefault(p => p > layerIdx, -1);
-            return nextPurge >= 0 && (long)nextPurge - layerIdx <= options.TowerSustainLatticeLayers;
+            if (nextPurge < 0 || (long)nextPurge - layerIdx > options.TowerSustainLatticeLayers)
+                return 0;
+            if (!options.TowerSustainAdaptive)
+                return baseSpacing;
+
+            var purgeZ = scan.Layers[Math.Min(nextPurge, scan.Layers.Count - 1)].Z;
+            var distanceMm = Math.Max(0, purgeZ - scan.Layers[Math.Min(layerIdx, scan.Layers.Count - 1)].Z);
+            var denseMm = options.TowerSustainDenseMm > 0 ? options.TowerSustainDenseMm : baseSpacing;
+            var maxSpacing = options.TowerSustainSpacingMaxMm > 0 ? options.TowerSustainSpacingMaxMm : baseSpacing * 4;
+            var spacing = baseSpacing;
+            var zoneBottom = denseMm;
+            while (distanceMm > zoneBottom && spacing * 2 <= maxSpacing + 1e-9)
+            {
+                spacing *= 2;
+                zoneBottom += spacing;
+            }
+            return spacing;
         }
 
         // The tower grows layer-synchronized with the model up to the LAST toolchange layer and
@@ -340,15 +485,15 @@ static class TowerPlanner
                             // when the layer above lands purge on it.
                             for (var i = 0; i < instances.Count; i++)
                             {
-                                var latticeNeeded = LatticeNeededOn(layerIdx, i);
+                                var towerSpacing = LatticeSpacingOn(layerIdx, i);
                                 if (visited[i])
                                 {
-                                    if (latticeNeeded && !cursors[i].Exhausted)
+                                    if (towerSpacing > 0 && !cursors[i].Exhausted)
                                         subVisits.Add(instances[i].Builder.TakeRemainderLattice(cursors[i], towerLayer.HeightMm));
                                 }
                                 else
                                 {
-                                    subVisits.Add(instances[i].Builder.Sustain(tIdx, towerLayer.HeightMm, latticeNeeded ? options.TowerSustainSpacingMm : 0));
+                                    subVisits.Add(instances[i].Builder.Sustain(tIdx, towerLayer.HeightMm, towerSpacing));
                                 }
                             }
                         }
@@ -358,25 +503,50 @@ static class TowerPlanner
 
                     var target = demand.PurgeMm.ToString("0.###", CultureInfo.InvariantCulture);
                     var header = $"; --- P2KLPU TOWER purge visit: layer {layerIdx}, T{demand.Change.FromTool} -> T{demand.Change.ToTool}, target {target}mm";
+                    // With the slicer's tower removed the toolchange sat inside that tower: the
+                    // recorded position is meaningless, and the slicer's own travel back to the
+                    // model (kept in the file) repositions the head after the visit. With model
+                    // blocks to relocate, the visit ends at the tower and the relocation emitter
+                    // takes the head through the blocks and back.
+                    var relocatedHere = relocations.TryGetValue(demand.Change.LineIndex, out var blocksToMove) ? blocksToMove : null;
+                    var returnToModel = !scan.SlicerTowerStripped && relocatedHere is null;
                     var blockLines = new List<string>(emitter.Build(
                         header,
                         towerLayer,
                         subVisits,
                         entryDepth: demand.Change.RetractDepthMm,
                         entryZ: demand.Change.ResumeZmm,
-                        resumeX: demand.Change.ResumeXmm,
-                        resumeY: demand.Change.ResumeYmm,
-                        resumeZ: demand.Change.ResumeZmm,
-                        lastFeedrate: demand.Change.LastFeedrate,
+                        resumeX: returnToModel ? demand.Change.ResumeXmm : null,
+                        resumeY: returnToModel ? demand.Change.ResumeYmm : null,
+                        resumeZ: returnToModel ? demand.Change.ResumeZmm : null,
+                        lastFeedrate: relocatedHere is null ? demand.Change.LastFeedrate : null,
                         speedMmMin: speed,
-                        dwellMsBeforePrint: options.TowerSpliceDwellMs))
+                        dwellMsBeforePrint: options.TowerSpliceDwellMs,
+                        exitDepth: relocatedHere is null ? null : retractLen.Value));
+                    var relocatedE = 0.0;
+                    if (relocatedHere is not null)
                     {
-                        "; --- P2KLPU TOWER purge visit end",
-                    };
+                        // The visit left the head lifted over the tower and the extruder retracted;
+                        // its E-only lines therefore net to (entry depth - retract length), which the
+                        // relocation's own restore brings back to the entry state.
+                        relocatedE = demand.Change.RetractDepthMm - retractLen.Value;
+                        relocatedE += PurgeIntoModelEmitter.Append(
+                            blockLines, lines, relocatedHere, towerLayer.Z,
+                            startDepthMm: retractLen.Value,
+                            retractLenMm: retractLen.Value, retractF: retractSpeed * 60, deretractF: deretractSpeed * 60,
+                            resumeX: scan.SlicerTowerStripped ? null : demand.Change.ResumeXmm,
+                            resumeY: scan.SlicerTowerStripped ? null : demand.Change.ResumeYmm,
+                            resumeZ: scan.SlicerTowerStripped ? null : demand.Change.ResumeZmm,
+                            entryDepthMm: demand.Change.RetractDepthMm,
+                            lastFeedrate: demand.Change.LastFeedrate,
+                            speedMmMin: speed,
+                            startLifted: true);
+                    }
+                    blockLines.Add("; --- P2KLPU TOWER purge visit end");
 
                     totalPurge += actual;
                     AddWaste(demand.Change.ToTool, actual);
-                    injections[demand.Change.LineIndex] = new TowerInjection(TowerInjectionKind.ReplaceLine, blockLines, actual);
+                    injections[demand.Change.LineIndex] = new TowerInjection(TowerInjectionKind.ReplaceLine, blockLines, actual + relocatedE);
                 }
             }
             else
@@ -396,7 +566,7 @@ static class TowerPlanner
                 var subVisits = new List<TowerSubVisit>();
                 for (var i = 0; i < instances.Count; i++)
                 {
-                    var towerSpacing = LatticeNeededOn(layerIdx, i) ? options.TowerSustainSpacingMm : 0;
+                    var towerSpacing = LatticeSpacingOn(layerIdx, i);
                     latticeSpacing = Math.Max(latticeSpacing, towerSpacing);
                     subVisits.Add(isFirstTowerLayer
                         ? instances[i].Builder.BrimAndFullDense(tIdx, towerLayer.HeightMm)
@@ -440,7 +610,7 @@ static class TowerPlanner
         // continuously — the situation where buffer error 121 appears. Surface the risk.
         if (demands.Count >= 10)
         {
-            var floorDriven = demands.Count(d => d.MinSpliceFloorMm > 0);
+            var floorDriven = demands.Count(d => d.MinSpliceFloorMm > d.PairPurgeMm);
             if (floorDriven * 2 >= demands.Count)
             {
                 warnings.Add(
@@ -474,7 +644,11 @@ static class TowerPlanner
             TotalSustainMm: totalSustain,
             FinalHeightMm: scan.Layers[lastToolchangeLayer].Z,
             WasteByToolMm: wasteByTool,
-            Towers: placements);
+            Towers: placements,
+            WipedIntoModelMm: wipedMm,
+            TransitionsWipedIntoModel: wipedCount,
+            TowerPurgeSavedMm: savedMm,
+            SlicerTowerRemovedMm: scan.SlicerTowerStrippedMm);
 
         return new TowerPlanResult(injections, errors, warnings, defineLines, stats);
     }
@@ -492,6 +666,7 @@ static class TowerPlanner
         double objectClearance,
         AxisAlignedBounds2D? bed,
         List<AxisAlignedBounds2D> objectBounds,
+        (double X, double Y)? preferredCorner,
         List<string> errors)
     {
         // Explicit dimensions: exactly one tower of that shape (user knows best), validated.
@@ -513,7 +688,7 @@ static class TowerPlanner
                 return null;
             }
 
-            return PlaceSingle(width, depth, options, brimInflate, objectClearance, bed, objectBounds, errors);
+            return PlaceSingle(width, depth, options, brimInflate, objectClearance, bed, objectBounds, preferredCorner, errors);
         }
 
         // Shape candidates: square first, then rectangles (both orientations), smallest area first.
@@ -547,6 +722,16 @@ static class TowerPlanner
             }
             errors.Add("TOWER: no footprint shape fits at the explicit TOWER_X/TOWER_Y position; remove it for automatic placement.");
             return null;
+        }
+
+        // The slicer's former tower spot first, if the footprint fits there.
+        if (preferredCorner.HasValue)
+        {
+            foreach (var (w, d) in candidates)
+            {
+                if (TowerPlacementSolver.Validate(preferredCorner.Value.X, preferredCorner.Value.Y, w, d, brimInflate, bed, objectBounds, objectClearance) is null)
+                    return new List<TowerPlacement> { new("P2KLPU_Tower", preferredCorner.Value.X, preferredCorner.Value.Y, w, d) };
+            }
         }
 
         // Auto placement: first shape that finds a free spot.
@@ -621,6 +806,7 @@ static class TowerPlanner
         double objectClearance,
         AxisAlignedBounds2D? bed,
         List<AxisAlignedBounds2D> objectBounds,
+        (double X, double Y)? preferredCorner,
         List<string> errors)
     {
         if (options.TowerXMm.HasValue && options.TowerYMm.HasValue)
@@ -637,6 +823,12 @@ static class TowerPlanner
                 return null;
             }
             return new List<TowerPlacement> { new("P2KLPU_Tower", options.TowerXMm.Value, options.TowerYMm.Value, width, depth) };
+        }
+
+        if (preferredCorner.HasValue
+            && TowerPlacementSolver.Validate(preferredCorner.Value.X, preferredCorner.Value.Y, width, depth, brimInflate, bed, objectBounds, objectClearance) is null)
+        {
+            return new List<TowerPlacement> { new("P2KLPU_Tower", preferredCorner.Value.X, preferredCorner.Value.Y, width, depth) };
         }
 
         var solved = TowerPlacementSolver.Solve(width, depth, brimInflate, bed, objectBounds, objectClearance);

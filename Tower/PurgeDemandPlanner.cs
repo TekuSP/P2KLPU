@@ -2,12 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-/// <summary>One planned purge: which toolchange it belongs to and how much filament to purge.</summary>
+/// <summary>One planned purge: which toolchange it belongs to and how much filament to purge on the tower.</summary>
 sealed record PurgeDemand(
     ToolchangeContext Change,
-    double PairPurgeMm,     // resolved per-pair purge
-    double MinSpliceFloorMm,// extra required by MINSPLICE for the segment this purge feeds
-    double PurgeMm);        // final = max of the above and the splice-offset floor
+    double PairPurgeMm,      // resolved per-pair purge (the whole transition tail)
+    double MinSpliceFloorMm, // extra required by MINSPLICE for the segment this purge feeds
+    double PurgeMm,          // final tower purge = max of the tail remainder and the floors (0 = no tower visit)
+    double WipedIntoModelMm);// what PrusaSlicer already purged into the model right after the change
 
 /// <summary>
 /// Sizes each transition's purge so the Palette's minimum splice lengths are satisfied by construction.
@@ -19,8 +20,12 @@ sealed record PurgeDemand(
 /// Sustaining-pass extrusion also lengthens segments but is deliberately ignored here
 /// (conservative: purge can only end up longer than strictly needed).
 ///
-/// A floor of SPLICEOFFSET + margin keeps the declared junction inside the purge span so the
-/// color transition lands on the tower.
+/// Wipe into infill/object: the filament PrusaSlicer routed into the model directly after the
+/// toolchange carries the transition tail as well, so the tower only needs the remainder of the pair
+/// purge. The declared junction has to sit inside the purge span (tower purge + wiped infill) with
+/// a margin of SPLICEOFFSET + 15 mm; by default the wiped infill may hold it, so a transition whose
+/// infill covers the whole tail needs no tower visit at all. <see cref="Options.PurgeJunctionOnTower"/>
+/// keeps that margin on the tower instead (the color change stays visible on the tower).
 /// </remarks>
 /// <seealso cref="CustomTowerGenerator"/>
 static class PurgeDemandPlanner
@@ -33,7 +38,10 @@ static class PurgeDemandPlanner
     /// <param name="scan">Pass-1 scan (raw timeline, no tower yet).</param>
     /// <param name="options">Options carrying purge directives and splice minimums.</param>
     /// <returns>Demands ordered like the transitions, plus advisory warnings.</returns>
-    public static (IReadOnlyList<PurgeDemand> Demands, IReadOnlyList<string> Warnings) Plan(RawMmuScanResult scan, Options options)
+    public static (IReadOnlyList<PurgeDemand> Demands, IReadOnlyList<string> Warnings) Plan(
+        RawMmuScanResult scan,
+        Options options,
+        IReadOnlyDictionary<int, double>? relocatedMmByToolchangeLine = null)
     {
         var warnings = new List<string>();
 
@@ -61,14 +69,25 @@ static class PurgeDemandPlanner
 
             var minSpliceFloor = Math.Max(0, options.MinSpliceLengthMm - followingModelE);
 
-            var purge = Math.Max(pairPurge, minSpliceFloor);
-            if (spliceOffsetFloor > purge)
+            // What the model takes right after the toolchange (PrusaSlicer's wiping, or blocks P2KLPU
+            // relocates itself) carries the tail; the tower takes the rest.
+            var wiped = Math.Max(0, change.WipedIntoModelMm);
+            if (relocatedMmByToolchangeLine is not null && relocatedMmByToolchangeLine.TryGetValue(change.LineIndex, out var relocated))
+                wiped += Math.Max(0, relocated);
+            var towerForTail = Math.Max(0, pairPurge - wiped);
+            var junctionFloor = spliceOffsetFloor <= 0
+                ? 0.0
+                : options.PurgeJunctionOnTower ? spliceOffsetFloor : Math.Max(0, spliceOffsetFloor - wiped);
+
+            var purge = Math.Max(towerForTail, minSpliceFloor);
+            if (junctionFloor > purge)
             {
-                purge = spliceOffsetFloor;
-                flooredCount++;
+                purge = junctionFloor;
+                if (wiped <= 0)
+                    flooredCount++;   // with wiped infill the floor is the intended remainder, nothing to tune
             }
 
-            demands.Add(new PurgeDemand(change, pairPurge, minSpliceFloor, purge));
+            demands.Add(new PurgeDemand(change, pairPurge, minSpliceFloor, purge, wiped));
         }
 
         if (flooredCount > 0)
@@ -81,7 +100,7 @@ static class PurgeDemandPlanner
         return (demands, warnings);
     }
 
-    private static double ResolvePairPurge(Options options, int fromTool, int toTool)
+    internal static double ResolvePairPurge(Options options, int fromTool, int toTool)
     {
         if (options.PurgeByInput.TryGetValue(new TransitionKey(fromTool + 1, toTool + 1), out var byInput))
             return byInput;
